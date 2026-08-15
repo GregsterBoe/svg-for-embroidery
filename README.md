@@ -49,6 +49,8 @@ svgemb check design.svg -p ./profiles/myshop.yaml
 svgemb profiles                                # list all rulesets
 svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
+
+svgemb serve                                   # local web UI on http://localhost:8000
 ```
 
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
@@ -65,6 +67,47 @@ for finding in report.errors:
     print(finding.rule_id, finding.message, finding.location)
 print(render_text(report, verbose=True))
 ```
+
+## Run it on your phone
+
+There are no compiled dependencies (SVG parsing is standard library, PyYAML is
+pure Python), so Termux installs it without a toolchain.
+
+```bash
+pkg update && pkg install python git
+git clone https://github.com/GregsterBoe/svg-for-embroidery
+cd svg-for-embroidery
+pip install -e .
+
+svgemb check ~/storage/shared/Download/design.svg   # command line
+svgemb serve                                        # or the web UI
+```
+
+For the CLI, run `termux-setup-storage` once so Termux can reach your Downloads
+folder. For the web UI, open **http://localhost:8000** in your phone's browser
+and pick the file through the normal Android file picker — no storage permission
+needed, since the browser reads the file and posts its contents to the local
+server.
+
+The web UI is one self-contained page (no CDN, no external fonts), so it works
+with the phone offline. It shows a preview of the design, lets you switch
+rulesets to compare shops, and has a "copy report as text" button. Pull down
+Termux's notification and tap **Acquire wakelock** if Android keeps killing the
+server in the background.
+
+```bash
+svgemb serve --port 8080          # different port
+svgemb serve --host 0.0.0.0       # reach it from your laptop: http://<phone-ip>:8000
+```
+
+`--host 0.0.0.0` exposes the checker to everyone on the same Wi-Fi, so use it
+only on a network you trust; the default binds to localhost only. The server
+writes nothing to disk — uploads are checked in memory and dropped, request
+bodies are capped at 8 MB, and the uploaded filename is stripped to its basename.
+
+Other options: **Pydroid 3** runs the CLI on Android without Termux, **a-Shell**
+does the same on iOS, and you can always run `svgemb serve --host 0.0.0.0` on a
+PC or Raspberry Pi and just browse to it from the phone.
 
 ## Adding a shop (the modular part)
 
@@ -175,7 +218,7 @@ is measured at its real size.
 ## Development
 
 ```bash
-python -m pytest        # 87 tests
+python -m pytest        # 98 tests
 ```
 
 Layout:
@@ -190,5 +233,6 @@ src/svg_embroidery/
   profiles/        profile loader + builtin/*.yaml rulesets
   checker.py       runs a profile against a document
   report.py        text / JSON rendering
+  server.py        stdlib-only web UI (svgemb serve)
   cli.py           svgemb
 ```

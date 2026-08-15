@@ -46,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     rules = subparsers.add_parser("rules", help="list available rules and their parameters")
     rules.add_argument("--json", action="store_true", help="machine readable output")
 
+    serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
+    serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address; use 0.0.0.0 to reach it from other devices on your network "
+        "(default: 127.0.0.1)",
+    )
+    serve.add_argument("-v", "--verbose", action="store_true", help="log every request")
+
     return parser
 
 
@@ -180,6 +190,17 @@ def _cmd_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from .server import serve  # imported lazily: only the CLI needs http.server
+
+    try:
+        serve(host=args.host, port=args.port, verbose=args.verbose)
+    except OSError as exc:
+        print(f"error: cannot serve on {args.host}:{args.port}: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -189,6 +210,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_profiles(args)
     if args.command == "rules":
         return _cmd_rules(args)
+    if args.command == "serve":
+        return _cmd_serve(args)
     parser.print_help()
     return 2
 

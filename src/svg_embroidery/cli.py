@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from .checker import Checker
-from .document import SvgParseError
+from .document import SvgParseError, load_svg
 from .profiles import ProfileError, list_profiles, load_profile
 from .report import render_json, render_summary, render_text
 from .rules import RuleConfigError, available_rules
+from .writer import WriterError
 
 DEFAULT_PROFILE = "embroidery-basic"
 
@@ -45,6 +46,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     rules = subparsers.add_parser("rules", help="list available rules and their parameters")
     rules.add_argument("--json", action="store_true", help="machine readable output")
+
+    roundtrip = subparsers.add_parser(
+        "roundtrip",
+        help="check that reading and re-writing a file changes nothing (A0 gate)",
+    )
+    roundtrip.add_argument("files", nargs="+", type=Path, help="SVG file(s) or directories")
+    roundtrip.add_argument(
+        "-r", "--recursive", action="store_true", help="descend into directories"
+    )
+    roundtrip.add_argument(
+        "--write-normalised",
+        metavar="DIR",
+        type=Path,
+        help="also write each re-serialised file into DIR for inspection",
+    )
 
     serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
     serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
@@ -190,6 +206,44 @@ def _cmd_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_roundtrip(args: argparse.Namespace) -> int:
+    from .roundtrip import check_file as roundtrip_file
+    from .roundtrip import find_renderer
+    from .writer import serialize
+
+    files = _collect_files(args.files, args.recursive)
+    files = [path for path in files if path.exists()]
+    if not files:
+        print("error: no SVG files found", file=sys.stderr)
+        return 2
+
+    if find_renderer() is None:
+        print("note: no SVG renderer found, so images are not compared\n")
+
+    failed = byte_identical = 0
+    for path in files:
+        try:
+            result = roundtrip_file(path)
+        except (SvgParseError, WriterError) as exc:
+            print(f"FAIL  {path.name}: {exc}")
+            failed += 1
+            continue
+        print(result.summary())
+        failed += 0 if result.ok else 1
+        byte_identical += 1 if result.byte_identical else 0
+
+        if args.write_normalised:
+            args.write_normalised.mkdir(parents=True, exist_ok=True)
+            out = args.write_normalised / path.name
+            out.write_text(serialize(load_svg(path)), encoding="utf-8")
+
+    print(
+        f"\n{len(files) - failed}/{len(files)} file(s) round-trip safely; "
+        f"{byte_identical} byte-identical."
+    )
+    return 1 if failed else 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve  # imported lazily: only the CLI needs http.server
 
@@ -210,6 +264,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_profiles(args)
     if args.command == "rules":
         return _cmd_rules(args)
+    if args.command == "roundtrip":
+        return _cmd_roundtrip(args)
     if args.command == "serve":
         return _cmd_serve(args)
     parser.print_help()

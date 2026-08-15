@@ -51,6 +51,7 @@ svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
 
 svgemb serve                                   # local web UI on http://localhost:8000
+svgemb roundtrip design.svg                    # verify read/write changes nothing
 ```
 
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
@@ -212,6 +213,15 @@ is measured at its real size.
 fixing of the errors reported here, then converting raster images into
 embroidery-ready SVGs. Both are split into steps with explicit validation gates.
 
+Step A0 is done: the tool can now write SVGs back out without damaging them,
+which is what everything else depends on. An element nobody edited is copied
+byte for byte from the source, so a future fix will produce a diff of the lines
+it actually changed. Check it against your own files with:
+
+```bash
+svgemb roundtrip ~/designs -r
+```
+
 ## What is *not* checked
 
 - **Minimum detail/gap size** — needs real path outline analysis (offsetting),
@@ -224,7 +234,7 @@ embroidery-ready SVGs. Both are split into steps with explicit validation gates.
 ## Development
 
 ```bash
-python -m pytest        # 98 tests
+python -m pytest        # 143 tests
 ```
 
 Layout:
@@ -239,6 +249,8 @@ src/svg_embroidery/
   profiles/        profile loader + builtin/*.yaml rulesets
   checker.py       runs a profile against a document
   report.py        text / JSON rendering
+  writer.py        serialising back out without damaging the file
+  roundtrip.py     proof that read -> write changes nothing (roadmap A0)
   server.py        stdlib-only web UI (svgemb serve)
   cli.py           svgemb
 ```

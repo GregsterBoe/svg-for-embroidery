@@ -30,7 +30,49 @@ corner.
 
 ## Phase A — Automatic fixes
 
-### A0. Round-trip fidelity — **the go/no-go gate** · size M
+### A0. Round-trip fidelity — **the go/no-go gate** · ✅ CLEARED
+
+**Outcome: ElementTree is good enough. The text-patching fallback is not needed** —
+but only with a verbatim-span layer on top, which turned out to be the real
+deliverable.
+
+Straight ElementTree serialisation cleared the semantic bar (identical document
+model, identical checker verdict, stable output) but rewrote every start tag:
+Inkscape's multi-line root element collapsed to one line, namespace declarations
+hoisted, quote styles changed. Semantically null, but it would have made every
+fixer's diff span the whole file — the churn this gate exists to prevent.
+
+So `document.scan_start_tags` records the source span of every start tag and
+pairs it with the parsed tree in document order. An element nobody edited is
+copied byte for byte; only edited elements get rebuilt. If the pairing ever
+fails to line up, the index is discarded and the writer reformats instead of
+guessing.
+
+Results on the corpus (`svgemb roundtrip tests/corpus`): 6/6 model-identical,
+verdict-identical and stable; 5/6 byte-identical. The sixth differs only in that
+`&#233;` in text content comes back as `é` — the parser resolves character
+references before we see them.
+
+Two hazards found and closed along the way, both of which would have corrupted
+real files:
+
+- Inkscape declares `xmlns` **and** `xmlns:svg` for the same URI, so generated
+  end tags came out as `</svg:metadata>` against a `<metadata>` start tag —
+  invalid XML. End tags are now taken from the source start tag itself.
+- A namespace declared on an element that a fixer edits disappears with the
+  rebuilt tag. The writer now detects this and hoists declarations to the root.
+
+Files with an internal DTD subset are **refused**, not written: the parser
+expands those entities on read, so writing back would silently inline them.
+
+Still open: the rendered-image comparison. No renderer is installed in the
+development container, so `render_identical` is `None` everywhere. The hook is
+written and skips cleanly; **A1 closes this**, and the gate should be re-run
+with a renderer present. The semantic checks above are what it passes on today.
+
+<details>
+<summary>Original plan for this step</summary>
+
 
 Before writing a single fix, prove we can read an SVG and write it back without
 damaging it. A fixer that silently corrupts files is worse than no fixer.
@@ -52,6 +94,15 @@ identical document model, and a rendered PNG of input and output are
 pixel-identical. If ElementTree can't clear this bar, fall back to *surgical
 text edits* on the original source (track source offsets, patch attributes in
 place) — decide here, not later.
+
+</details>
+
+> **Note on the corpus.** The committed fixtures are modelled on real exporter
+> output (Inkscape's `sodipodi:namedview` and RDF metadata, Illustrator's
+> DOCTYPE and `.st0` classes, Figma's flat `clipPath` defs), not captured from
+> those applications. Dropping genuine exports into `tests/corpus/` picks them
+> up automatically, and `svgemb roundtrip <file>` runs the same gate over any
+> file — worth doing with real designs before A3 lands.
 
 ### A1. Visual regression harness · size M
 

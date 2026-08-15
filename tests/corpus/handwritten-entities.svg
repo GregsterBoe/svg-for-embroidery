@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="10cm" height="10cm" viewBox="0 0 100 100">
+  <title>Caf&#233; &amp; Co &#8212; test</title>
+  <desc xml:space="preserve">  spaced   text  </desc>
+  <!-- a comment that must survive -->
+  <?render-hint quality="high"?>
+  <g id="only-layer" fill='#2f4b7c'>
+    <path d="M 5 5 L 95 5 L 95 50 L 5 50 Z"/>
+    <rect x="20" y="60" width="60" height="30"></rect>
+  </g>
+</svg>
+<!-- trailing comment -->

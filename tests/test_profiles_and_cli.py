@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -166,3 +167,29 @@ def test_cli_unknown_profile(examples_dir, capsys):
 def test_cli_missing_file(capsys):
     assert main(["check", "does-not-exist.svg"]) == 2
     assert "no such file" in capsys.readouterr().err
+
+
+def test_cli_roundtrip_command(capsys):
+    corpus = Path(__file__).parent / "corpus"
+    assert main(["roundtrip", str(corpus)]) == 0
+    out = capsys.readouterr().out
+    assert "round-trip safely" in out
+    assert "byte-identical" in out
+
+
+def test_cli_roundtrip_reports_a_broken_file(tmp_path, capsys):
+    broken = tmp_path / "entities.svg"
+    broken.write_text(
+        '<!DOCTYPE svg [<!ENTITY x "y">]>\n'
+        '<svg xmlns="http://www.w3.org/2000/svg"><desc>&x;</desc></svg>',
+        encoding="utf-8",
+    )
+    assert main(["roundtrip", str(broken)]) == 1
+    assert "internal DTD subset" in capsys.readouterr().out
+
+
+def test_cli_roundtrip_can_write_normalised_output(tmp_path, capsys):
+    corpus = Path(__file__).parent / "corpus"
+    out_dir = tmp_path / "normalised"
+    assert main(["roundtrip", str(corpus), "--write-normalised", str(out_dir)]) == 0
+    assert len(list(out_dir.glob("*.svg"))) == len(list(corpus.glob("*.svg")))

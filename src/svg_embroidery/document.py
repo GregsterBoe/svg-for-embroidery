@@ -48,6 +48,277 @@ class SvgParseError(Exception):
     """Raised when a file cannot be parsed as SVG."""
 
 
+XML_NS = "http://www.w3.org/XML/1998/namespace"
+
+_XMLNS_RE = re.compile(
+    r"""xmlns(?::([A-Za-z_][\w.\-]*))?\s*=\s*(?:"([^"]*)"|'([^']*)')"""
+)
+_ENCODING_RE = re.compile(r"""encoding\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+_ROOT_NAME_RE = re.compile(r"<([^\s/>]+)")
+
+
+@dataclass
+class SourceFormat:
+    """Everything about the original file that the XML tree does not carry.
+
+    The parser throws this away — the XML declaration, the DOCTYPE, comments
+    outside the root, line endings, the byte order mark and namespace
+    declarations that nothing uses. :mod:`svg_embroidery.writer` puts it back.
+    """
+
+    #: Text before the root element, verbatim (XML declaration, DOCTYPE, comments).
+    prologue: str = ""
+    #: Text after the root element's closing tag, verbatim.
+    epilogue: str = ""
+    #: Namespace prefix ("" for the default namespace) -> URI, in source order.
+    nsmap: Dict[str, str] = field(default_factory=dict)
+    #: Line ending used by the file.
+    newline: str = "\n"
+    #: File started with a UTF-8 byte order mark.
+    bom: bool = False
+    #: Encoding declared in the XML declaration.
+    encoding: str = "utf-8"
+    #: The file declares entities in an internal DTD subset (see writer.py).
+    has_internal_subset: bool = False
+
+
+def _scan_prologue(source: str) -> Tuple[str, int, bool]:
+    """Return ``(prologue, root_offset, has_internal_subset)``.
+
+    Walks the declarations before the root element by hand, because the parser
+    reports none of them.
+    """
+    index = 0
+    has_internal_subset = False
+    while True:
+        start = source.find("<", index)
+        if start < 0:
+            raise SvgParseError("no root element found")
+        if source.startswith("<?", start):
+            end = source.find("?>", start)
+            if end < 0:
+                raise SvgParseError("unterminated processing instruction")
+            index = end + 2
+        elif source.startswith("<!--", start):
+            end = source.find("-->", start)
+            if end < 0:
+                raise SvgParseError("unterminated comment")
+            index = end + 3
+        elif source[start : start + 9].upper() == "<!DOCTYPE":
+            cursor = start
+            in_subset = False
+            while cursor < len(source):
+                char = source[cursor]
+                if char == "[":
+                    in_subset = True
+                    has_internal_subset = True
+                elif char == "]":
+                    in_subset = False
+                elif char == ">" and not in_subset:
+                    break
+                cursor += 1
+            if cursor >= len(source):
+                raise SvgParseError("unterminated DOCTYPE")
+            index = cursor + 1
+        else:
+            return source[:start], start, has_internal_subset
+
+
+def _scan_epilogue(source: str, root_offset: int) -> str:
+    """Text following the root element."""
+    match = _ROOT_NAME_RE.match(source, root_offset)
+    if not match:
+        return ""
+    start = source.rfind(f"</{match.group(1)}")
+    if start >= 0:
+        end = source.find(">", start)
+        return source[end + 1 :] if end >= 0 else ""
+
+    # A self-closing root has no end tag: find the end of its start tag.
+    cursor, quote = root_offset + 1, ""
+    while cursor < len(source):
+        char = source[cursor]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ">":
+            return source[cursor + 1 :]
+        cursor += 1
+    return ""
+
+
+def _scan_namespaces(source: str) -> Dict[str, str]:
+    """Every namespace declaration in the file, including unused ones.
+
+    The parser drops declarations nothing references, and Inkscape/Illustrator
+    files are full of them.
+    """
+    nsmap: Dict[str, str] = {}
+    for match in _XMLNS_RE.finditer(source):
+        prefix = match.group(1) or ""
+        uri = match.group(2) if match.group(2) is not None else match.group(3)
+        existing = nsmap.get(prefix)
+        if existing is not None and existing != uri:
+            raise SvgParseError(
+                f"namespace prefix '{prefix or '(default)'}' is declared twice with "
+                f"different URIs ('{existing}' and '{uri}'); refusing to guess"
+            )
+        nsmap[prefix] = uri
+    return nsmap
+
+
+@dataclass
+class StartTag:
+    """Where an element's start tag sits in the source, and how it was written."""
+
+    start: int
+    end: int
+    self_closing: bool
+
+
+def scan_start_tags(source: str) -> List[StartTag]:
+    """Find every element start tag in document order.
+
+    The XML parser records text and tail whitespace, so the only formatting it
+    loses is *inside* start tags — the line breaks Inkscape and Illustrator put
+    between attributes, the quote style, and whether an empty element was
+    written ``<rect/>`` or ``<rect></rect>``. Keeping the source spans lets the
+    writer reproduce untouched elements exactly.
+    """
+    tags: List[StartTag] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        start = source.find("<", index)
+        if start < 0:
+            break
+        if source.startswith("<!--", start):
+            end = source.find("-->", start)
+            index = length if end < 0 else end + 3
+        elif source.startswith("<![CDATA[", start):
+            end = source.find("]]>", start)
+            index = length if end < 0 else end + 3
+        elif source.startswith("<?", start):
+            end = source.find("?>", start)
+            index = length if end < 0 else end + 2
+        elif source.startswith("</", start):
+            end = source.find(">", start)
+            index = length if end < 0 else end + 1
+        elif source.startswith("<!", start):
+            cursor, in_subset = start, False
+            while cursor < length:
+                char = source[cursor]
+                if char == "[":
+                    in_subset = True
+                elif char == "]":
+                    in_subset = False
+                elif char == ">" and not in_subset:
+                    break
+                cursor += 1
+            index = cursor + 1
+        else:
+            cursor = start + 1
+            quote = ""
+            while cursor < length:
+                char = source[cursor]
+                if quote:
+                    if char == quote:
+                        quote = ""
+                elif char in "\"'":
+                    quote = char
+                elif char == ">":
+                    break
+                cursor += 1
+            if cursor >= length:
+                break
+            self_closing = source[start:cursor].rstrip().endswith("/")
+            tags.append(StartTag(start=start, end=cursor + 1, self_closing=self_closing))
+            index = cursor + 1
+    return tags
+
+
+def _elements_in_order(element: ElementTree.Element) -> Iterator[ElementTree.Element]:
+    """Pre-order traversal of real elements, skipping comments and PIs."""
+    if isinstance(element.tag, str):
+        yield element
+    for child in element:
+        if isinstance(child.tag, str):
+            yield from _elements_in_order(child)
+
+
+@dataclass
+class VerbatimIndex:
+    """Original start-tag text per element, and the attributes it encoded.
+
+    An element may be reproduced verbatim only while its attributes still match
+    what the source said — once a fixer edits them, the tag is rewritten.
+    """
+
+    source: str
+    spans: Dict[int, StartTag] = field(default_factory=dict)
+    attributes: Dict[int, Dict[str, str]] = field(default_factory=dict)
+
+    def unchanged(self, element: ElementTree.Element) -> bool:
+        key = id(element)
+        return key in self.spans and self.attributes.get(key) == element.attrib
+
+    def text_for(self, element: ElementTree.Element) -> Tuple[str, bool]:
+        span = self.spans[id(element)]
+        return self.source[span.start : span.end], span.self_closing
+
+
+def build_verbatim_index(root: ElementTree.Element, source: str) -> Optional[VerbatimIndex]:
+    """Pair parsed elements with their source spans, or give up safely.
+
+    Both sequences are in document order, so they line up one to one. If they
+    ever don't, return ``None`` and let the writer fall back to reformatting —
+    guessing here would corrupt files.
+    """
+    tags = scan_start_tags(source)
+    elements = list(_elements_in_order(root))
+    if len(tags) != len(elements):
+        return None
+
+    index = VerbatimIndex(source=source)
+    for element, tag in zip(elements, tags):
+        index.spans[id(element)] = tag
+        index.attributes[id(element)] = dict(element.attrib)
+    return index
+
+
+def analyze_source(source: str) -> Tuple[SourceFormat, str]:
+    """Split a raw document into its :class:`SourceFormat` and normalised text.
+
+    The returned text has no BOM and uses ``\\n``, matching what the parser
+    produces, so comparisons are not confused by line endings.
+    """
+    bom = source.startswith("﻿")
+    if bom:
+        source = source[1:]
+
+    newline = "\r\n" if "\r\n" in source else "\n"
+    normalised = source.replace("\r\n", "\n").replace("\r", "\n")
+
+    prologue, root_offset, has_internal_subset = _scan_prologue(normalised)
+    encoding_match = _ENCODING_RE.search(prologue)
+    encoding = "utf-8"
+    if encoding_match:
+        encoding = (encoding_match.group(1) or encoding_match.group(2) or "utf-8").lower()
+
+    fmt = SourceFormat(
+        prologue=prologue,
+        epilogue=_scan_epilogue(normalised, root_offset),
+        nsmap=_scan_namespaces(normalised),
+        newline=newline,
+        bom=bom,
+        encoding=encoding,
+        has_internal_subset=has_internal_subset,
+    )
+    return fmt, normalised
+
+
 def local_name(tag: str) -> str:
     """``{http://...}path`` -> ``path``."""
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) and "}" in tag else tag
@@ -207,6 +478,10 @@ class SvgDocument:
     user_unit_mm: Optional[float] = None
     #: How the physical size was derived: ``attributes``, ``viewbox`` or ``unknown``.
     size_source: str = "unknown"
+    #: Formatting details the XML tree cannot carry; used when writing back.
+    format: SourceFormat = field(default_factory=SourceFormat)
+    #: Original start-tag text per element; ``None`` when it could not be built.
+    verbatim: Optional["VerbatimIndex"] = None
 
     # -- lookups -----------------------------------------------------------
     def by_tag(self, *tags: str) -> List[Node]:
@@ -339,8 +614,18 @@ def _walk(
 
 def parse_svg(source: str, path: Optional[Path] = None) -> SvgDocument:
     """Parse SVG markup into an :class:`SvgDocument`."""
+    if isinstance(source, bytes):
+        source = source.decode("utf-8")
+    fmt, source = analyze_source(source)
+
+    # insert_comments/insert_pis keep comments and processing instructions in
+    # the tree, so writing the document back does not delete them.
+    parser = ElementTree.XMLParser(
+        target=ElementTree.TreeBuilder(insert_comments=True, insert_pis=True)
+    )
     try:
-        root = ElementTree.fromstring(source.encode("utf-8") if isinstance(source, str) else source)
+        parser.feed(source)
+        root = parser.close()
     except ElementTree.ParseError as exc:
         raise SvgParseError(str(exc)) from exc
 
@@ -359,24 +644,37 @@ def parse_svg(source: str, path: Optional[Path] = None) -> SvgDocument:
     return SvgDocument(
         path=path,
         root=root,
+        verbatim=build_verbatim_index(root, source),
         source=source,
         nodes=nodes,
         width_mm=width_mm,
         height_mm=height_mm,
         user_unit_mm=user_unit_mm,
         size_source=size_source,
+        format=fmt,
     )
 
 
 def load_svg(path) -> SvgDocument:
-    """Read and parse an SVG file from disk."""
+    """Read and parse an SVG file from disk.
+
+    Reads bytes rather than text: ``read_text`` silently rewrites CRLF to LF,
+    which would make the writer change every line of a Windows-authored file.
+    """
     file_path = Path(path)
     try:
-        text = file_path.read_text(encoding="utf-8")
+        raw = file_path.read_bytes()
     except OSError as exc:
         raise SvgParseError(f"cannot read file: {exc}") from exc
-    except UnicodeDecodeError as exc:
-        raise SvgParseError(f"file is not valid UTF-8 text: {exc}") from exc
+
+    encoding = "utf-8"
+    declared = _ENCODING_RE.search(raw[:200].decode("ascii", "replace"))
+    if declared:
+        encoding = (declared.group(1) or declared.group(2) or "utf-8").lower()
+    try:
+        text = raw.decode(encoding)
+    except (UnicodeDecodeError, LookupError) as exc:
+        raise SvgParseError(f"cannot decode file as {encoding}: {exc}") from exc
     return parse_svg(text, path=file_path)
 
 

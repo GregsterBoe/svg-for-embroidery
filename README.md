@@ -52,6 +52,7 @@ svgemb rules                                   # list all checks and their param
 
 svgemb serve                                   # local web UI on http://localhost:8000
 svgemb roundtrip design.svg                    # verify read/write changes nothing
+svgemb doctor                                  # what this machine can do
 ```
 
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
@@ -213,14 +214,37 @@ is measured at its real size.
 fixing of the errors reported here, then converting raster images into
 embroidery-ready SVGs. Both are split into steps with explicit validation gates.
 
-Step A0 is done: the tool can now write SVGs back out without damaging them,
-which is what everything else depends on. An element nobody edited is copied
-byte for byte from the source, so a future fix will produce a diff of the lines
-it actually changed. Check it against your own files with:
+Steps A0 and A1 are done — the two foundations everything else needs:
+
+- **A0** — the tool writes SVGs back out without damaging them. An element
+  nobody edited is copied byte for byte from the source, so a future fix
+  produces a diff of the lines it actually changed.
+- **A1** — it can measure whether a change altered the rendered image, so a
+  "safe" fix can be proved safe rather than asserted to be.
+
+Check both against your own files:
 
 ```bash
 svgemb roundtrip ~/designs -r
 ```
+
+### Optional capabilities
+
+The checker needs nothing but the standard library and PyYAML. Heavier work is
+detected at runtime and degrades explicitly — a capability you don't have is a
+measurement you don't get, never a crash. `svgemb doctor` shows where you stand
+and what to install:
+
+| Tier | Enables | Install |
+| --- | --- | --- |
+| Core | check, fix, write, round-trip, web UI | nothing — always available |
+| Rendering | visual regression, before/after previews | `pkg install librsvg` (Termux), `apt install librsvg2-bin`, or `pip install cairosvg` |
+| Path geometry | stroke → outline, minimum feature size | `pip install "svg-for-embroidery[geometry]"` |
+| Raster | image → SVG conversion | `pip install "svg-for-embroidery[convert]"` + potrace |
+
+There is deliberately **no separate mobile edition** — see the decision in
+[`docs/ROADMAP.md`](docs/ROADMAP.md). When a phone can't run a heavy step, run
+`svgemb serve --host 0.0.0.0` on a desktop and use it from the phone's browser.
 
 ## What is *not* checked
 
@@ -234,7 +258,7 @@ svgemb roundtrip ~/designs -r
 ## Development
 
 ```bash
-python -m pytest        # 143 tests
+python -m pytest        # 168 tests
 ```
 
 Layout:
@@ -251,6 +275,8 @@ src/svg_embroidery/
   report.py        text / JSON rendering
   writer.py        serialising back out without damaging the file
   roundtrip.py     proof that read -> write changes nothing (roadmap A0)
+  visual.py        render + compare images; pure-Python PNG (roadmap A1)
+  capabilities.py  what this machine can do (svgemb doctor)
   server.py        stdlib-only web UI (svgemb serve)
   cli.py           svgemb
 ```

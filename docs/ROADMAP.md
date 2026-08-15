@@ -21,10 +21,58 @@ corner.
 
 | Rule | Why |
 | --- | --- |
-| **The core stays dependency-free** (stdlib + PyYAML) | It runs in Termux with no toolchain. Fixing and converting get *optional* extras: `pip install svg-for-embroidery[fix]`, `[convert]`. Installing the converter must never be required to run the checker. |
+| **The core stays dependency-free** (stdlib + PyYAML) | It runs in Termux with no toolchain. Heavier work goes in optional extras (`[render]`, `[geometry]`, `[convert]`) and is detected at runtime — see the decision below. Installing the converter must never be required to run the checker. |
 | **The profile is the spec** | Rules already encode what a shop wants. Fixers and the converter read their targets from the *same* profile — max colours becomes the quantiser's `k`, min stroke width becomes a morphology kernel, canvas size becomes output dimensions. No second source of truth. |
 | **Never destroy input** | Fixes write to a new file by default. `--in-place` requires an explicit flag and keeps a `.bak`. |
 | **Every step ends at a gate** | Each step below has a *done when* that can be checked by running something, not by opinion. If a gate fails, we stop and fix it rather than stacking the next step on top. |
+
+---
+
+## Decision: one codebase, not a mobile and a desktop edition
+
+**Asked early, on purpose.** The question was whether keeping this runnable on a
+phone would hold back the desktop features. Answer: **it doesn't, so there is no
+fork.** One codebase, capabilities detected at runtime, and heavy work offloaded
+over the network when a device can't do it locally.
+
+The evidence, measured rather than assumed (`svgemb doctor` prints it per
+machine):
+
+| Tier | Needs | On a phone (Termux)? | If missing |
+| --- | --- | --- | --- |
+| **Core** — check, write, round-trip, fix, web UI | stdlib + PyYAML | Yes, always | n/a |
+| **Rendering** (A1) — visual regression, previews | any of `rsvg-convert`, `resvg`, Inkscape, `cairosvg` | Yes — `pkg install librsvg` | comparisons are skipped, nothing fails |
+| **Raster** (B3+) — image → SVG | Pillow + potrace | Yes — `pkg install python-pillow potrace` | conversion unavailable |
+| **Path geometry** (A5) — offsetting, booleans | shapely or pyclipper | **Maybe** — needs GEOS and a compiler; the one fragile tier | stroke→outline and min-feature-size unavailable |
+
+So only *one* tier is genuinely at risk on mobile, and only for two features.
+That is nowhere near enough to justify maintaining two versions of a checker
+that has no mobile problem at all.
+
+**Why not fork.** A fork splits along *dependencies*, but the features are the
+same on both sides. We would duplicate the entire checker — the part that runs
+happily anywhere — to solve a problem confined to two later steps. Two codebases
+means divergent bugs and a mobile edition that quietly rots.
+
+**What we do instead.**
+
+1. Every heavy capability is optional and detected at runtime. A capability you
+   don't have is a *measurement you don't get*, never a crash — the pattern A1
+   established, where a missing renderer returns `None` and callers skip.
+2. `svgemb doctor` reports what this machine can do and exactly what to install
+   for the rest, with per-platform hints (Termux included). It defers to the
+   modules themselves, so it cannot claim a capability the code won't use.
+3. **The mobile/desktop split is a runtime split, not a code split.** When a
+   phone can't do the heavy step, run `svgemb serve --host 0.0.0.0` on a desktop
+   and use it from the phone's browser. That already works — the phone becomes a
+   client, and no second codebase exists to maintain.
+
+`SVGEMB_NO_RENDERER=1` forces the degraded path on any machine, so CI proves the
+bare-install experience instead of assuming it.
+
+**Revisit if:** Phase B needs something with no Android build at all (an ML
+background remover, say). Even then the answer is not a fork — that feature is
+server-only and the UI reports it as unavailable.
 
 ---
 
@@ -65,10 +113,9 @@ real files:
 Files with an internal DTD subset are **refused**, not written: the parser
 expands those entities on read, so writing back would silently inline them.
 
-Still open: the rendered-image comparison. No renderer is installed in the
-development container, so `render_identical` is `None` everywhere. The hook is
-written and skips cleanly; **A1 closes this**, and the gate should be re-run
-with a renderer present. The semantic checks above are what it passes on today.
+~~Still open: the rendered-image comparison.~~ **Closed by A1**: with
+`rsvg-convert` installed, all six corpus files are now render-verified as well
+as model-verified.
 
 <details>
 <summary>Original plan for this step</summary>
@@ -104,10 +151,38 @@ place) — decide here, not later.
 > up automatically, and `svgemb roundtrip <file>` runs the same gate over any
 > file — worth doing with real designs before A3 lands.
 
-### A1. Visual regression harness · size M
+### A1. Visual regression harness · ✅ CLEARED
 
-The tool that answers "did this change how the design looks?" — needed by every
-fixer, and again by the whole of Phase B.
+Lives in `visual.py`. Rendering is delegated to whatever is installed
+(`rsvg-convert` preferred, then `resvg`, Inkscape, `cairosvg`); **decoding and
+comparison are pure Python** — PNG is zlib plus five filter types, which is
+little enough code to keep the harness free of compiled dependencies and
+working on a phone. The decoder is verified byte-for-byte against Pillow where
+Pillow happens to be installed.
+
+Two details that matter more than they look:
+
+- **Compositing before comparing is not cosmetic.** Renderers leave arbitrary
+  colour values in fully transparent pixels, so comparing raw RGBA reports
+  differences in parts of the image nobody can see. Both sides are flattened
+  onto white first.
+- **Both sides always go through the same renderer.** Mixing two would compare
+  their antialiasing rather than the documents.
+
+Verified: identical input scores zero; a colour change scores 11.7% of pixels;
+**reformatting scores zero** — the property every fixer depends on. All three
+hold across every installed renderer.
+
+This also closed A0's open half: the corpus now round-trips **6/6
+render-verified**, not merely model-verified.
+
+`svgemb doctor` reports renderer availability, and `SVGEMB_NO_RENDERER=1` forces
+the degraded path — the suite passes either way (168 with a renderer; 162 plus 6
+skips without), and the core was separately proved to run with every optional
+dependency blocked.
+
+<details>
+<summary>Original plan for this step</summary>
 
 **Do:** render SVG → PNG via `resvg` (single static binary, no Python build) or
 `rsvg-convert`, with `cairosvg` as fallback. Compare images, return a difference
@@ -115,6 +190,8 @@ score. Skip cleanly (don't fail) when no renderer is installed.
 
 **Done when:** `compare(a, a) == 0`, a known-different pair scores above
 threshold, and the suite still passes on a machine with no renderer at all.
+
+</details>
 
 ### A2. The fix protocol · size M
 
@@ -213,9 +290,9 @@ report it as a manual step. Revisit only if it becomes the top complaint.
 
 ## Gate between the phases
 
-Do not start Phase B until: A0 round-trips cleanly, A1 can measure visual
-difference, A3 fixers hold their four invariants, and A5 has a working geometry
-layer. Phase B leans on all four — starting early means debugging a tracer and a
+Do not start Phase B until: ~~A0 round-trips cleanly~~ ✅, ~~A1 can measure
+visual difference~~ ✅, A3 fixers hold their four invariants, and A5 has a
+working geometry layer. Phase B leans on all four — starting early means debugging a tracer and a
 broken writer at the same time.
 
 ---

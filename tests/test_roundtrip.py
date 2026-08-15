@@ -11,12 +11,8 @@ import pytest
 
 from svg_embroidery.document import parse_svg
 from svg_embroidery.profiles import list_profiles
-from svg_embroidery.roundtrip import (
-    check_file,
-    check_roundtrip,
-    find_renderer,
-    tree_signature,
-)
+from svg_embroidery.roundtrip import check_file, check_roundtrip, tree_signature
+from svg_embroidery.visual import default_renderer
 from svg_embroidery.writer import serialize
 
 CORPUS = sorted((Path(__file__).parent / "corpus").glob("*.svg"))
@@ -92,7 +88,7 @@ def test_check_roundtrip_on_a_string():
 
 def test_render_comparison_is_skipped_without_a_renderer():
     result = check_roundtrip('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>')
-    if find_renderer() is None:
+    if default_renderer() is None:
         assert result.render_identical is None
         assert result.ok  # a missing renderer must not fail the gate
     else:

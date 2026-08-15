@@ -193,3 +193,20 @@ def test_cli_roundtrip_can_write_normalised_output(tmp_path, capsys):
     out_dir = tmp_path / "normalised"
     assert main(["roundtrip", str(corpus), "--write-normalised", str(out_dir)]) == 0
     assert len(list(out_dir.glob("*.svg"))) == len(list(corpus.glob("*.svg")))
+
+
+def test_cli_doctor(capsys):
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "Core" in out and "Rendering" in out
+
+
+def test_cli_doctor_json(capsys):
+    assert main(["doctor", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    keys = {c["key"]: c for c in payload["capabilities"]}
+    assert keys["core"]["available"] is True  # core needs nothing
+    # Anything unavailable must say how to get it.
+    for capability in payload["capabilities"]:
+        if not capability["available"]:
+            assert capability["hint"]

@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write each re-serialised file into DIR for inspection",
     )
 
+    doctor = subparsers.add_parser(
+        "doctor", help="show which capabilities are available on this machine"
+    )
+    doctor.add_argument("--json", action="store_true", help="machine readable output")
+
     serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
     serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
     serve.add_argument(
@@ -208,7 +213,7 @@ def _cmd_rules(args: argparse.Namespace) -> int:
 
 def _cmd_roundtrip(args: argparse.Namespace) -> int:
     from .roundtrip import check_file as roundtrip_file
-    from .roundtrip import find_renderer
+    from .visual import default_renderer
     from .writer import serialize
 
     files = _collect_files(args.files, args.recursive)
@@ -217,8 +222,11 @@ def _cmd_roundtrip(args: argparse.Namespace) -> int:
         print("error: no SVG files found", file=sys.stderr)
         return 2
 
-    if find_renderer() is None:
+    renderer = default_renderer()
+    if renderer is None:
         print("note: no SVG renderer found, so images are not compared\n")
+    else:
+        print(f"note: comparing rendered output with {renderer.name}\n")
 
     failed = byte_identical = 0
     for path in files:
@@ -244,6 +252,48 @@ def _cmd_roundtrip(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    from .capabilities import describe_platform, report
+
+    statuses = report()
+    if args.json:
+        import json
+
+        print(
+            json.dumps(
+                {"platform": describe_platform(), "capabilities": [s.to_dict() for s in statuses]},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    print(f"svgemb capabilities on {describe_platform()}\n")
+    for status in statuses:
+        mark = "yes" if status.available else "no "
+        print(f"[{mark}] {status.capability.title:<18} {status.capability.enables}")
+        if status.found:
+            for label, version in status.found.items():
+                print(f"       using {label} ({version})")
+        if not status.available:
+            if status.missing:
+                print(f"       missing: {', '.join(status.missing)}")
+            if status.hint:
+                print(f"       install: {status.hint}")
+        print()
+
+    unavailable = [s for s in statuses if not s.available]
+    if unavailable:
+        print(
+            "Checking and fixing SVGs never needs any of the above. For heavy work on a\n"
+            "device that cannot install it, run 'svgemb serve --host 0.0.0.0' on a machine\n"
+            "that can, and use it from the browser."
+        )
+    else:
+        print("Everything is available on this machine.")
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve  # imported lazily: only the CLI needs http.server
 
@@ -266,6 +316,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_rules(args)
     if args.command == "roundtrip":
         return _cmd_roundtrip(args)
+    if args.command == "doctor":
+        return _cmd_doctor(args)
     if args.command == "serve":
         return _cmd_serve(args)
     parser.print_help()

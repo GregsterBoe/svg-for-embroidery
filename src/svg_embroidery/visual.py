@@ -1,0 +1,421 @@
+"""A1: measuring whether a change altered the image.
+
+Every fixer needs one question answered — *did this change how the design
+looks?* — and Phase B needs the same machinery to score traced output against
+its source. So it lives here, once.
+
+Rendering is delegated to whatever is installed (``rsvg-convert``, ``resvg``,
+``cairosvg``, Inkscape). Decoding and comparison are pure Python: PNG is zlib
+plus five filter types, which is little enough code that the harness stays free
+of compiled dependencies and keeps working on a phone.
+
+Nothing here is required. With no renderer installed, :func:`visual_difference`
+returns ``None`` and callers skip the comparison rather than failing — a
+missing renderer is a missing measurement, not a broken build.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple
+
+#: Rendered width used for comparisons. Big enough to show a thin stroke
+#: changing, small enough that a pure-Python decode stays quick.
+DEFAULT_WIDTH = 256
+
+#: Per-channel difference (0-255) below which two pixels count as equal.
+DEFAULT_TOLERANCE = 2
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+#: Bytes per pixel for the PNG colour types renderers actually emit.
+_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
+
+
+class RenderError(Exception):
+    """Raised when a renderer is present but could not draw the file."""
+
+
+class PngError(Exception):
+    """Raised for PNG data we cannot decode."""
+
+
+# ---------------------------------------------------------------- rasters
+
+
+@dataclass(frozen=True)
+class Raster:
+    """A decoded image: ``width * height`` pixels, 4 bytes each (RGBA)."""
+
+    width: int
+    height: int
+    pixels: bytes
+
+    @property
+    def size(self) -> Tuple[int, int]:
+        return (self.width, self.height)
+
+    def composite_over(self, background: Tuple[int, int, int] = (255, 255, 255)) -> bytes:
+        """Flatten onto a solid background, returning RGB bytes.
+
+        This is not cosmetic. Renderers leave arbitrary colour values in fully
+        transparent pixels, so comparing raw RGBA reports differences in parts
+        of the image nobody can see. Compositing first compares what is
+        actually visible.
+        """
+        out = bytearray(self.width * self.height * 3)
+        pixels = self.pixels
+        br, bg, bb = background
+        for index in range(0, len(pixels), 4):
+            alpha = pixels[index + 3]
+            target = (index // 4) * 3
+            if alpha == 255:
+                out[target : target + 3] = pixels[index : index + 3]
+            elif alpha == 0:
+                out[target] = br
+                out[target + 1] = bg
+                out[target + 2] = bb
+            else:
+                inverse = 255 - alpha
+                out[target] = (pixels[index] * alpha + br * inverse) // 255
+                out[target + 1] = (pixels[index + 1] * alpha + bg * inverse) // 255
+                out[target + 2] = (pixels[index + 2] * alpha + bb * inverse) // 255
+        return bytes(out)
+
+
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+
+
+def _unfilter(raw: bytes, width: int, height: int, channels: int) -> bytearray:
+    """Undo PNG's per-scanline filters."""
+    stride = width * channels
+    out = bytearray(stride * height)
+    previous = bytearray(stride)
+    position = 0
+    for row in range(height):
+        filter_type = raw[position]
+        position += 1
+        line = bytearray(raw[position : position + stride])
+        position += stride
+
+        if filter_type == 1:  # Sub
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 0xFF
+        elif filter_type == 2:  # Up
+            for i in range(stride):
+                line[i] = (line[i] + previous[i]) & 0xFF
+        elif filter_type == 3:  # Average
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + previous[i]) >> 1)) & 0xFF
+        elif filter_type == 4:  # Paeth
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                upper_left = previous[i - channels] if i >= channels else 0
+                line[i] = (line[i] + _paeth(left, previous[i], upper_left)) & 0xFF
+        elif filter_type != 0:
+            raise PngError(f"unknown PNG filter type {filter_type}")
+
+        out[row * stride : (row + 1) * stride] = line
+        previous = line
+    return out
+
+
+def decode_png(data: bytes) -> Raster:
+    """Decode an 8-bit, non-interlaced PNG into RGBA.
+
+    That covers what every SVG renderer emits. Anything else raises, rather
+    than returning an image that quietly means something different.
+    """
+    if not data.startswith(PNG_SIGNATURE):
+        raise PngError("not a PNG file")
+
+    position = len(PNG_SIGNATURE)
+    header: Optional[Tuple[int, int, int, int, int]] = None
+    idat = bytearray()
+    palette = b""
+    transparency = b""
+
+    while position + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[position : position + 4])
+        kind = data[position + 4 : position + 8]
+        body = data[position + 8 : position + 8 + length]
+        position += 12 + length  # length + type + body + CRC
+
+        if kind == b"IHDR":
+            width, height, depth, color_type, _, _, interlace = struct.unpack(
+                ">IIBBBBB", body
+            )
+            header = (width, height, depth, color_type, interlace)
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"PLTE":
+            palette = body
+        elif kind == b"tRNS":
+            transparency = body
+        elif kind == b"IEND":
+            break
+
+    if header is None:
+        raise PngError("PNG has no header chunk")
+    width, height, depth, color_type, interlace = header
+    if depth != 8:
+        raise PngError(f"unsupported PNG bit depth {depth}")
+    if interlace:
+        raise PngError("interlaced PNGs are not supported")
+    if color_type == 3 and not palette:
+        raise PngError("paletted PNG without a palette")
+    if color_type not in _CHANNELS and color_type != 3:
+        raise PngError(f"unsupported PNG colour type {color_type}")
+
+    channels = 1 if color_type == 3 else _CHANNELS[color_type]
+    raw = _unfilter(zlib.decompress(bytes(idat)), width, height, channels)
+
+    rgba = bytearray(width * height * 4)
+    for index in range(width * height):
+        source = index * channels
+        target = index * 4
+        if color_type == 0:  # greyscale
+            value = raw[source]
+            rgba[target : target + 4] = bytes((value, value, value, 255))
+        elif color_type == 2:  # RGB
+            rgba[target : target + 3] = raw[source : source + 3]
+            rgba[target + 3] = 255
+        elif color_type == 3:  # palette
+            entry = raw[source] * 3
+            rgba[target : target + 3] = palette[entry : entry + 3]
+            alpha_index = raw[source]
+            rgba[target + 3] = (
+                transparency[alpha_index] if alpha_index < len(transparency) else 255
+            )
+        elif color_type == 4:  # greyscale + alpha
+            value = raw[source]
+            rgba[target : target + 4] = bytes((value, value, value, raw[source + 1]))
+        else:  # RGBA
+            rgba[target : target + 4] = raw[source : source + 4]
+    return Raster(width=width, height=height, pixels=bytes(rgba))
+
+
+# ------------------------------------------------------------ comparison
+
+
+@dataclass(frozen=True)
+class Difference:
+    """How far apart two renderings are."""
+
+    changed_pixels: int
+    total_pixels: int
+    max_delta: int
+    mean_delta: float
+    note: str = ""
+
+    @property
+    def ratio(self) -> float:
+        return self.changed_pixels / self.total_pixels if self.total_pixels else 0.0
+
+    @property
+    def identical(self) -> bool:
+        return self.changed_pixels == 0
+
+    def within(self, budget: float) -> bool:
+        """True when at most ``budget`` (0-1) of the image changed."""
+        return self.ratio <= budget
+
+    def __str__(self) -> str:
+        if self.identical:
+            return "images identical"
+        return (
+            f"{self.changed_pixels}/{self.total_pixels} pixels differ "
+            f"({self.ratio:.2%}), max channel delta {self.max_delta}"
+        )
+
+
+def compare_rasters(
+    left: Raster, right: Raster, tolerance: int = DEFAULT_TOLERANCE
+) -> Difference:
+    """Compare two rasters after flattening them onto white."""
+    if left.size != right.size:
+        return Difference(
+            changed_pixels=max(left.width * left.height, right.width * right.height),
+            total_pixels=max(left.width * left.height, right.width * right.height),
+            max_delta=255,
+            mean_delta=255.0,
+            note=f"different sizes: {left.size} vs {right.size}",
+        )
+
+    a = left.composite_over()
+    b = right.composite_over()
+    total = left.width * left.height
+    changed = 0
+    max_delta = 0
+    sum_delta = 0
+
+    for index in range(0, len(a), 3):
+        delta = max(
+            abs(a[index] - b[index]),
+            abs(a[index + 1] - b[index + 1]),
+            abs(a[index + 2] - b[index + 2]),
+        )
+        if delta:
+            sum_delta += delta
+            if delta > max_delta:
+                max_delta = delta
+            if delta > tolerance:
+                changed += 1
+
+    return Difference(
+        changed_pixels=changed,
+        total_pixels=total,
+        max_delta=max_delta,
+        mean_delta=sum_delta / total if total else 0.0,
+    )
+
+
+# ------------------------------------------------------------- renderers
+
+
+@dataclass(frozen=True)
+class Renderer:
+    """One way of turning SVG text into PNG bytes."""
+
+    name: str
+    #: Given (input path, output path, width) produce a command line.
+    command: Optional[Callable[[Path, Path, int], Sequence[str]]] = None
+    #: Alternative for in-process renderers.
+    call: Optional[Callable[[str, int], bytes]] = None
+
+    def render(self, source: str, width: int = DEFAULT_WIDTH) -> bytes:
+        if self.call is not None:
+            try:
+                return self.call(source, width)
+            except Exception as exc:  # noqa: BLE001 - third-party failure modes vary
+                raise RenderError(f"{self.name} failed: {exc}") from exc
+
+        assert self.command is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            svg_path = Path(tmp) / "in.svg"
+            png_path = Path(tmp) / "out.png"
+            svg_path.write_text(source, encoding="utf-8")
+            try:
+                subprocess.run(
+                    self.command(svg_path, png_path, width),
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+            except subprocess.CalledProcessError as exc:
+                detail = exc.stderr.decode("utf-8", "replace").strip()[:200]
+                raise RenderError(f"{self.name} failed: {detail}") from exc
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RenderError(f"{self.name} failed: {exc}") from exc
+            if not png_path.exists():
+                raise RenderError(f"{self.name} produced no output")
+            return png_path.read_bytes()
+
+
+def _cairosvg_render(source: str, width: int) -> bytes:
+    import cairosvg  # imported lazily: optional dependency
+
+    return cairosvg.svg2png(bytestring=source.encode("utf-8"), output_width=width)
+
+
+#: Candidates in preference order. Fast and faithful first.
+_CANDIDATES: Tuple[Tuple[str, Renderer], ...] = (
+    (
+        "rsvg-convert",
+        Renderer(
+            name="rsvg-convert",
+            command=lambda src, out, w: ["rsvg-convert", "-w", str(w), "-o", str(out), str(src)],
+        ),
+    ),
+    (
+        "resvg",
+        Renderer(
+            name="resvg",
+            command=lambda src, out, w: ["resvg", "--width", str(w), str(src), str(out)],
+        ),
+    ),
+    (
+        "inkscape",
+        Renderer(
+            name="inkscape",
+            command=lambda src, out, w: [
+                "inkscape",
+                str(src),
+                "--export-type=png",
+                f"--export-width={w}",
+                f"--export-filename={out}",
+            ],
+        ),
+    ),
+)
+
+
+#: Set this to pretend nothing is installed — useful in CI to prove that the
+#: degraded path really works, rather than assuming it does.
+DISABLE_ENV_VAR = "SVGEMB_NO_RENDERER"
+
+
+def renderers_disabled() -> bool:
+    return os.environ.get(DISABLE_ENV_VAR, "").strip() not in ("", "0", "false", "no")
+
+
+def available_renderers() -> List[Renderer]:
+    """Every renderer installed on this machine, best first."""
+    if renderers_disabled():
+        return []
+    found = [renderer for executable, renderer in _CANDIDATES if shutil.which(executable)]
+    try:
+        import cairosvg  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        found.append(Renderer(name="cairosvg", call=_cairosvg_render))
+    return found
+
+
+def default_renderer() -> Optional[Renderer]:
+    """The renderer to use, or ``None`` when the machine has none."""
+    renderers = available_renderers()
+    return renderers[0] if renderers else None
+
+
+def render(source: str, width: int = DEFAULT_WIDTH, renderer: Optional[Renderer] = None) -> Optional[Raster]:
+    """Render SVG text, or ``None`` when nothing is installed to do it."""
+    renderer = renderer or default_renderer()
+    if renderer is None:
+        return None
+    return decode_png(renderer.render(source, width))
+
+
+def visual_difference(
+    before: str,
+    after: str,
+    width: int = DEFAULT_WIDTH,
+    renderer: Optional[Renderer] = None,
+    tolerance: int = DEFAULT_TOLERANCE,
+) -> Optional[Difference]:
+    """How much two SVG documents differ visually.
+
+    Returns ``None`` when no renderer is installed. Both sides always go
+    through the *same* renderer — mixing two would compare their antialiasing,
+    not the documents.
+    """
+    renderer = renderer or default_renderer()
+    if renderer is None:
+        return None
+    left = decode_png(renderer.render(before, width))
+    right = decode_png(renderer.render(after, width))
+    return compare_rasters(left, right, tolerance=tolerance)

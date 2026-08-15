@@ -22,24 +22,14 @@ A file passes when the last three hold.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Sequence, Union
 from xml.etree import ElementTree
 
-from .document import SvgDocument, parse_svg
+from .document import parse_svg
+from .visual import Difference, RenderError, default_renderer, visual_difference
 from .writer import serialize
-
-#: Renderers we know how to drive, best first. Each entry is
-#: (executable, argument builder). Used only to confirm the image is unchanged.
-_RENDERERS = (
-    ("resvg", lambda src, out: ["resvg", str(src), str(out)]),
-    ("rsvg-convert", lambda src, out: ["rsvg-convert", "-o", str(out), str(src)]),
-    ("inkscape", lambda src, out: ["inkscape", str(src), "--export-filename", str(out)]),
-)
 
 
 def tree_signature(element: ElementTree.Element, *, ordered_attributes: bool = False) -> Any:
@@ -66,36 +56,6 @@ def tree_signature(element: ElementTree.Element, *, ordered_attributes: bool = F
     )
 
 
-def find_renderer() -> Optional[Tuple[str, Any]]:
-    """First available SVG renderer, or ``None`` when the machine has none."""
-    for name, builder in _RENDERERS:
-        if shutil.which(name):
-            return name, builder
-    return None
-
-
-def render_png(source: str, renderer: Optional[Tuple[str, Any]] = None) -> Optional[bytes]:
-    """Render SVG text to PNG bytes, or ``None`` if no renderer is installed."""
-    renderer = renderer or find_renderer()
-    if renderer is None:
-        return None
-    _, builder = renderer
-    with tempfile.TemporaryDirectory() as tmp:
-        svg_path = Path(tmp) / "in.svg"
-        png_path = Path(tmp) / "out.png"
-        svg_path.write_text(source, encoding="utf-8")
-        try:
-            subprocess.run(
-                builder(svg_path, png_path),
-                check=True,
-                capture_output=True,
-                timeout=60,
-            )
-        except (subprocess.SubprocessError, OSError):
-            return None
-        return png_path.read_bytes() if png_path.exists() else None
-
-
 @dataclass
 class RoundTripResult:
     """Outcome of writing one document back out."""
@@ -108,6 +68,8 @@ class RoundTripResult:
     stable: bool = False
     #: ``None`` when no renderer is installed, so nothing could be compared.
     render_identical: Optional[bool] = None
+    #: The measured pixel difference, when one was taken.
+    render_difference: Optional[Difference] = None
     differences: List[str] = field(default_factory=list)
 
     @property
@@ -125,6 +87,8 @@ class RoundTripResult:
             notes.append("normalised")
         if self.render_identical is None:
             notes.append("render unchecked")
+        else:
+            notes.append("render verified")
         suffix = f" ({', '.join(notes)})" if notes else " (byte-identical)"
         return f"ok    {self.name}{suffix}"
 
@@ -196,14 +160,16 @@ def check_roundtrip(
     result.checks_identical = identical_checks
 
     if check_render:
-        renderer = find_renderer()
-        if renderer is not None:
-            before_png = render_png(source, renderer)
-            after_png = render_png(written, renderer)
-            if before_png is not None and after_png is not None:
-                result.render_identical = before_png == after_png
-                if not result.render_identical:
-                    result.differences.append(f"rendered output changed ({renderer[0]})")
+        try:
+            difference = visual_difference(source, written)
+        except RenderError as exc:
+            result.differences.append(f"could not render: {exc}")
+            difference = None
+        if difference is not None:
+            result.render_difference = difference
+            result.render_identical = difference.identical
+            if not difference.identical:
+                result.differences.append(f"rendered output changed: {difference}")
 
     return result
 

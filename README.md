@@ -206,6 +206,12 @@ aware), resolved presentation attributes (inheritance and `style=` applied) and
 cumulative transform scales — so a `stroke-width` inside `transform="scale(4)"`
 is measured at its real size.
 
+## Where this is going
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) plans the next two phases: opt-in automatic
+fixing of the errors reported here, then converting raster images into
+embroidery-ready SVGs. Both are split into steps with explicit validation gates.
+
 ## What is *not* checked
 
 - **Minimum detail/gap size** — needs real path outline analysis (offsetting),

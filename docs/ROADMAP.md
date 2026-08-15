@@ -193,30 +193,57 @@ threshold, and the suite still passes on a machine with no renderer at all.
 
 </details>
 
-### A2. The fix protocol · size M
+### A2. The fix protocol · ✅ CLEARED
+
+Rules stayed pure. A `Fixer` is a separate object registered against a rule id,
+built from the **configured rule instance** — so a fixer repairs to exactly the
+numbers the profile checks, rather than to a second copy of them. The ground
+rule "the profile is the spec", made structural.
+
+| Risk | Meaning | Default |
+| --- | --- | --- |
+| `SAFE` | Cannot change the rendered image | applied |
+| `LOSSY` | Changes the image on purpose | needs `--allow lossy` |
+| `DESTRUCTIVE` | May change what the designer meant | asked for explicitly |
+
+**The engine checks these claims instead of trusting them.** After a run it
+re-checks the document and renders before/after: a `SAFE` fix that moves a
+pixel, or any fix that introduces a new error, is reported as a failed run and
+the output is not offered for writing. That is what A1 was built for, and it is
+covered by a test with a deliberately lying fixer.
+
+`verify_fixer()` holds a fixer to the four invariants — fixes the target, no
+regressions, idempotent, within its visual budget — and is **public rather than
+test-only**, so fixers added later (including shop-specific ones) can be held to
+the same bar. `verify_no_op()` is the floor beneath it all: a run that fixes
+nothing returns the file byte for byte, verified across the whole corpus.
+
+Two things worth recording:
+
+- **Fixers re-parse between runs.** The document model caches resolved styles
+  and geometry, so without re-parsing the second fixer in a run would read a
+  stale view of what the first one changed. Verified by a test that watches one
+  fixer observe another's output.
+- **Idempotence is "running the engine again changes nothing further".** The
+  case it really catches is a fixer that never satisfies its own rule and so
+  gets re-applied forever, churning the file each pass.
+
+One reference fixer ships with it — `geometry.require_viewbox`, which adds the
+viewBox the renderer already assumed. End to end it produces a **one-line diff**
+(A0's verbatim spans) and **zero pixels changed** (A1's harness). The batch of
+safe fixes is A3; the `svgemb fix` command is A6. Until then `svgemb rules`
+marks which rules are fixable and at what risk.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Keep rules pure. A `Fixer` is a separate object registered against a rule id,
 so a rule that can't be fixed simply has none.
 
-```python
-@register_fixer("geometry.require_viewbox")
-class AddViewBox(Fixer):
-    risk = Risk.SAFE
-    def apply(self, doc) -> FixOutcome: ...
-```
-
-Three risk levels, because "fix it" means different things:
-
-| Risk | Meaning | Example |
-| --- | --- | --- |
-| `SAFE` | Cannot change appearance | add `viewBox`, normalise `#FFF`→`#ffffff`, drop unused `<defs>` |
-| `LOSSY` | Changes appearance predictably, on purpose | quantise 5 colours down to 3, flatten opacity |
-| `DESTRUCTIVE` | May change design intent | regroup layers (z-order), close a path with a large gap |
-
-Default is `SAFE` only; the rest are opt-in per run or per profile.
-
 **Done when:** a no-op fixer round-trips a file unchanged, and risk gating is
 covered by tests.
+
+</details>
 
 ### A3. Safe fixes · size M
 
@@ -231,8 +258,8 @@ The first real batch — all of them appearance-preserving:
 
 **Done when:** for each fixer, the target rule fails before and passes after;
 no other rule's error count increases; `fix(fix(x)) == fix(x)`; visual
-difference is zero. Make these four assertions a shared test helper — every
-later fixer reuses it.
+difference is zero. ~~Make these four assertions a shared test helper~~ — A2
+shipped it as `fixes.verify_fixer()`; every fixer here just calls it.
 
 ### A4. Lossy fixes · size L
 

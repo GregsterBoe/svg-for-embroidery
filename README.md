@@ -214,13 +214,29 @@ is measured at its real size.
 fixing of the errors reported here, then converting raster images into
 embroidery-ready SVGs. Both are split into steps with explicit validation gates.
 
-Steps A0 and A1 are done — the two foundations everything else needs:
+Steps A0, A1 and A2 are done — the foundations everything else needs:
 
 - **A0** — the tool writes SVGs back out without damaging them. An element
   nobody edited is copied byte for byte from the source, so a future fix
   produces a diff of the lines it actually changed.
 - **A1** — it can measure whether a change altered the rendered image, so a
   "safe" fix can be proved safe rather than asserted to be.
+- **A2** — the fix protocol. Fixers register against a rule, declare a risk
+  level (`safe` / `lossy` / `destructive`), and only safe ones run by default.
+  The engine verifies its own work: a "safe" fix that moves a pixel, or any fix
+  that introduces a new error, fails the run instead of being written out.
+
+```python
+from svg_embroidery.fixes import FixEngine
+
+engine = FixEngine.from_profile_name("embroidery-basic")
+report = engine.fix_source(open("design.svg").read())
+print(report.summary())   # what changed, and whether it verified
+print(report.diff())      # unified diff of just the changed lines
+```
+
+`svgemb rules` marks which rules are fixable and at what risk. The batch of
+safe fixes is step A3; the `svgemb fix` command lands in A6.
 
 Check both against your own files:
 
@@ -258,7 +274,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 168 tests
+python -m pytest        # 194 tests
 ```
 
 Layout:
@@ -277,6 +293,7 @@ src/svg_embroidery/
   roundtrip.py     proof that read -> write changes nothing (roadmap A0)
   visual.py        render + compare images; pure-Python PNG (roadmap A1)
   capabilities.py  what this machine can do (svgemb doctor)
+  fixes/           the fix protocol, engine and verifier (roadmap A2)
   server.py        stdlib-only web UI (svgemb serve)
   cli.py           svgemb
 ```

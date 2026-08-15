@@ -1,0 +1,42 @@
+# Template for a shop-specific ruleset.
+#
+# Copy this file to ./profiles/<shopname>.yaml (or to a directory on
+# $SVG_EMBROIDERY_PROFILE_PATH) and adjust it. Only the differences to the
+# profile you extend need to be listed.
+#
+#   svgemb check design.svg --profile example-shop
+#
+name: example-shop
+title: Example Shop GmbH
+description: >
+  Demonstrates the extension mechanism: inherits the basic embroidery ruleset,
+  tightens the canvas size, restricts colours to the shop's thread palette and
+  downgrades the layer separation to a warning.
+url: https://example.com/upload-requirements
+extends: embroidery-basic
+
+rules:
+  - id: geometry.canvas_size
+    params:
+      min_width_cm: 10
+      max_width_cm: 25
+      min_height_cm: 10
+      max_height_cm: 35
+
+  - id: geometry.aspect_ratio
+    params:
+      max_ratio: 2.5
+    severity: warning
+
+  # Only these thread colours are stocked.
+  - id: color.allowed_palette
+    params:
+      palette_name: "Example Shop thread palette"
+      colors: ["#000000", "#ffffff", "#c8102e", "#00843d", "#f2a900"]
+
+  - id: structure.color_layers
+    severity: warning
+
+  - id: stroke.min_width
+    params:
+      min_mm: 2.0

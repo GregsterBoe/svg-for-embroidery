@@ -1,0 +1,50 @@
+name: embroidery-basic
+title: Basic embroidery requirements
+description: >
+  The common denominator most embroidery shops ask for: a print-ready size,
+  a handful of flat colours separated per layer, no gradients, text converted
+  to paths, closed contours and lines thick enough to be stitched.
+
+rules:
+  - id: file.extension
+    params:
+      allowed: [".svg"]
+
+  - id: geometry.canvas_size
+    params:
+      min_cm: 10
+      max_cm: 38
+
+  - id: geometry.require_viewbox
+    severity: warning
+
+  - id: color.max_count
+    params:
+      max_colors: 3
+
+  - id: color.no_gradients
+
+  - id: color.no_transparency
+    severity: warning
+
+  - id: structure.color_layers
+    params:
+      require_layers: true
+      max_colors_per_layer: 1
+
+  - id: element.forbidden
+    params:
+      tags: ["text", "image", "filter", "foreignObject", "mask"]
+
+  - id: document.no_raster
+
+  - id: path.closed
+    params:
+      check_subpaths: true
+
+  - id: stroke.min_width
+    params:
+      min_mm: 1.5
+
+  - id: fill.required
+    severity: warning

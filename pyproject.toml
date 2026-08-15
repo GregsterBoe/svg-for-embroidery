@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "svg-for-embroidery"
+version = "0.1.0"
+description = "Modular rule checker for SVG files destined for embroidery and print-on-demand shops"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+svgemb = "svg_embroidery.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+svg_embroidery = ["profiles/builtin/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

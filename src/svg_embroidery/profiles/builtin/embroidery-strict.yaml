@@ -1,0 +1,31 @@
+name: embroidery-strict
+title: Strict embroidery requirements
+description: >
+  For shops that stitch small and cheap: fewer colours, no strokes at all
+  (outlines must be filled paths), thicker minimum details and a cap on how
+  many separate shapes a design may contain.
+extends: embroidery-basic
+
+rules:
+  - id: geometry.canvas_size
+    params:
+      min_cm: 8
+      max_cm: 30
+
+  - id: color.max_count
+    params:
+      max_colors: 2
+
+  # Strokes are not allowed at all here, so the width check is pointless.
+  - id: stroke.forbidden
+
+  - id: path.max_count
+    params:
+      max_paths: 60
+    severity: warning
+
+  - id: color.no_transparency
+    severity: error
+
+disable:
+  - stroke.min_width

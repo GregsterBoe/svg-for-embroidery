@@ -1,0 +1,41 @@
+name: plotter-vinyl
+title: Vinyl plotter / cutting file
+description: >
+  Cutting plotters need exactly one colour per file, closed contours only and
+  no strokes — the cutter follows the outline of filled shapes. Small sizes are
+  fine, but hair-thin details tear when weeding.
+
+rules:
+  - id: file.extension
+    params:
+      allowed: [".svg"]
+
+  - id: geometry.canvas_size
+    params:
+      min_cm: 2
+      max_cm: 30
+
+  - id: geometry.require_viewbox
+    severity: warning
+
+  - id: color.max_count
+    params:
+      max_colors: 1
+
+  - id: color.no_gradients
+
+  - id: color.no_transparency
+
+  - id: element.forbidden
+    params:
+      tags: ["text", "image", "filter", "foreignObject", "mask", "clipPath"]
+
+  - id: document.no_raster
+
+  - id: path.closed
+    params:
+      check_subpaths: true
+
+  - id: stroke.forbidden
+
+  - id: fill.required

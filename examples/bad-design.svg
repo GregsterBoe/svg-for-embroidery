@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Deliberately broken: too small, too many colours, a gradient, live text,
+     an open path and a hairline stroke. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="5cm" height="5cm" viewBox="0 0 50 50">
+  <defs>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff0000"/>
+      <stop offset="1" stop-color="#0000ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="50" height="20" fill="url(#fade)"/>
+  <path d="M 5 25 L 45 25 L 45 30 L 5 30" fill="#00ff00"/>
+  <path d="M 5 35 L 45 35" fill="none" stroke="#ff00ff" stroke-width="0.2"/>
+  <circle cx="10" cy="45" r="3" fill="#123456"/>
+  <text x="5" y="48" font-size="4" fill="#654321">Hello</text>
+</svg>

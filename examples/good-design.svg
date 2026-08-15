@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Passes embroidery-basic: 12x12 cm, two colours, one per layer,
+     closed paths, strokes wider than 1.5 mm. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="12cm" height="12cm" viewBox="0 0 120 120">
+  <g id="layer-black" fill="#000000" stroke="none">
+    <path d="M 10 10 L 110 10 L 110 40 L 10 40 Z"/>
+    <circle cx="60" cy="80" r="25"/>
+  </g>
+  <g id="layer-red" fill="#c8102e" stroke="none">
+    <path d="M 20 50 L 100 50 L 60 70 Z M 30 95 L 90 95 L 90 105 L 30 105 Z"/>
+  </g>
+</svg>

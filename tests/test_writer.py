@@ -202,3 +202,38 @@ def test_analyze_source_reports_the_format():
     assert fmt.newline == "\r\n"
     assert "\r" not in normalised
     assert fmt.prologue.startswith("<?xml")
+
+
+def test_removing_attributes_keeps_the_tag_layout():
+    """A safe fix that drops attributes must not reflow the author's file."""
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg"\n'
+        '   width="10cm"\n'
+        '   height="10cm"\n'
+        '   data-editor="scratch"\n'
+        '   id="root">\n'
+        "</svg>"
+    )
+    doc = parse_svg(source)
+    del doc.root.attrib["data-editor"]
+    written = serialize(doc)
+
+    assert 'data-editor' not in written
+    assert '   width="10cm"\n   height="10cm"\n' in written  # layout untouched
+    assert written.count("\n") == source.count("\n") - 1
+
+
+def test_changing_an_attribute_still_rebuilds_the_tag():
+    source = '<svg xmlns="http://www.w3.org/2000/svg"\n   width="10cm">\n</svg>'
+    doc = parse_svg(source)
+    doc.root.set("width", "12cm")
+    written = serialize(doc)
+    assert 'width="12cm"' in written
+    assert "\n   width" not in written  # rebuilt, so the line break is gone
+
+
+def test_attribute_removal_falls_back_when_the_name_cannot_be_found():
+    from svg_embroidery.writer import _tag_without_attributes
+
+    assert _tag_without_attributes('<g a="1" b="2">', ["a"]) == '<g b="2">'
+    assert _tag_without_attributes('<g a="1">', ["missing"]) is None

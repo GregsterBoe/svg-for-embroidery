@@ -175,6 +175,7 @@ is a commented template to copy.
 | `structure.color_layers` | Each colour on its own layer |
 | `element.forbidden` | No `<text>`, `<image>`, `<filter>`, … |
 | `document.no_raster` | No embedded bitmap `data:image` payloads |
+| `document.no_editor_metadata` | No leftover editor state (it can carry your file name) |
 | `path.closed` | Every path *and subpath* ends with `Z` |
 | `path.max_count` | Design doesn't exceed N shapes |
 | `stroke.min_width` | Effective stroke width ≥ N mm |
@@ -235,8 +236,20 @@ print(report.summary())   # what changed, and whether it verified
 print(report.diff())      # unified diff of just the changed lines
 ```
 
-`svgemb rules` marks which rules are fixable and at what risk. The batch of
-safe fixes is step A3; the `svgemb fix` command lands in A6.
+- **A3** — the first batch of safe fixers. All of them preserve the image
+  exactly, verified against a renderer:
+
+| Rule | Fix |
+| --- | --- |
+| `geometry.canvas_size` | scale width/height into the allowed range |
+| `geometry.require_viewbox` | add the viewBox implied by width/height |
+| `color.no_gradients` | delete gradient definitions nothing references |
+| `element.forbidden` | remove forbidden elements that draw nothing |
+| `document.no_editor_metadata` | strip editor state, keeping layer annotations |
+
+They only remove what was never being drawn, so anything visible is left alone
+with an explanation. `svgemb rules` marks which rules are fixable and at what
+risk; the `svgemb fix` command lands in A6.
 
 Check both against your own files:
 
@@ -274,7 +287,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 194 tests
+python -m pytest        # 220 tests
 ```
 
 Layout:

@@ -264,6 +264,25 @@ class VerbatimIndex:
         key = id(element)
         return key in self.spans and self.attributes.get(key) == element.attrib
 
+    def removed_attributes(self, element: ElementTree.Element) -> Optional[List[str]]:
+        """Attribute names dropped since parsing, if that is the *only* change.
+
+        Deleting an attribute is the common shape of a safe fix (stripping
+        editor metadata, dropping a filter reference), and it can be done to the
+        original tag text with scissors — keeping the author's line breaks
+        instead of reflowing a fourteen-line ``<svg>`` onto one line. Returns
+        ``None`` when anything was added or modified, since that needs a rebuild.
+        """
+        original = self.attributes.get(id(element))
+        if original is None or id(element) not in self.spans:
+            return None
+        current = element.attrib
+        for key, value in current.items():
+            if key not in original or original[key] != value:
+                return None
+        dropped = [key for key in original if key not in current]
+        return dropped or None
+
     def text_for(self, element: ElementTree.Element) -> Tuple[str, bool]:
         span = self.spans[id(element)]
         return self.source[span.start : span.end], span.self_closing

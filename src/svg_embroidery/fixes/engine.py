@@ -155,6 +155,13 @@ class FixEngine:
             counts[finding.rule_id] = counts.get(finding.rule_id, 0) + 1
         return counts
 
+    def _regression(self, before: Dict[str, int], after: Dict[str, int]) -> str:
+        """Rules whose error count went up, as a readable list."""
+        worsened = [
+            rule_id for rule_id, count in after.items() if count > before.get(rule_id, 0)
+        ]
+        return ", ".join(sorted(worsened))
+
     def _verify(self, report: FixReport) -> None:
         """Check the engine's own output before anyone trusts it."""
         if report.after is None:  # pragma: no cover - always set by fix_source
@@ -166,17 +173,11 @@ class FixEngine:
             )
             return
 
-        before = self._errors_per_rule(report.before)
-        after = self._errors_per_rule(report.after)
-        worsened = [
-            rule_id
-            for rule_id, count in after.items()
-            if count > before.get(rule_id, 0)
-        ]
+        worsened = self._regression(
+            self._errors_per_rule(report.before), self._errors_per_rule(report.after)
+        )
         if worsened:
-            report.verification_error = (
-                f"fixing introduced new errors in: {', '.join(sorted(worsened))}"
-            )
+            report.verification_error = f"fixing introduced new errors in: {worsened}"
             return
 
         if report.visual is None or not report.applied:
@@ -233,13 +234,35 @@ class FixEngine:
                         rule.id, outcome.declined or "fixer made no changes", fixer.risk
                     )
                 )
+                doc = parse_svg(current_source, path=path)  # drop any partial edits
+                continue
+
+            # Re-parse between fixers: the document model caches resolved styles
+            # and geometry, so the next fixer must not read a stale view.
+            candidate_source = serialize(doc)
+            candidate = parse_svg(candidate_source, path=path)
+
+            # Each fix stands on its own. Scaling a canvas down, for instance,
+            # can push strokes under the minimum width — that fix gets rolled
+            # back rather than poisoning the whole run.
+            regression = self._regression(
+                self._errors_per_rule(before),
+                self._errors_per_rule(self.checker.check_document(candidate)),
+            )
+            if regression:
+                report.skipped.append(
+                    SkippedFix(
+                        rule.id,
+                        f"rolled back: it would introduce errors in {regression}",
+                        fixer.risk,
+                    )
+                )
+                doc = parse_svg(current_source, path=path)
                 continue
 
             report.applied.append(AppliedFix(rule.id, fixer.risk, outcome.changes))
-            # Re-parse between fixers: the document model caches resolved styles
-            # and geometry, so the next fixer must not read a stale view.
-            current_source = serialize(doc)
-            doc = parse_svg(current_source, path=path)
+            current_source = candidate_source
+            doc = candidate
 
         report.source_after = current_source
         report.after = self.checker.check_document(doc)

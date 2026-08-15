@@ -139,7 +139,7 @@ def test_verify_rejects_a_sample_that_does_not_fail():
 
 
 def test_verify_reports_a_missing_fixer():
-    result = verify_fixer(NO_VIEWBOX, "color.no_gradients")
+    result = verify_fixer(NO_VIEWBOX, "path.closed")  # closing paths is a lossy fix (A4)
     assert not result.ok
     assert "no fixer is registered" in result.summary()
 
@@ -207,8 +207,8 @@ def test_rules_without_a_fixer_are_reported_as_such():
 
 # -- the engine polices its own output -------------------------------------
 
-def test_a_fix_that_introduces_new_errors_is_caught(registry):
-    """Verification does not need a renderer to catch a bad repair."""
+def test_a_fix_that_would_introduce_errors_is_rolled_back(registry):
+    """Each fix stands alone: a bad one is reverted, not left in the file."""
 
     class OverEnthusiastic(Fixer):
         rule_id = "geometry.require_viewbox"
@@ -227,9 +227,41 @@ def test_a_fix_that_introduces_new_errors_is_caught(registry):
     engine = FixEngine.from_profile_name("embroidery-basic")
     report = engine.fix_source(NO_VIEWBOX)
 
-    assert not report.ok
-    assert "new errors" in report.verification_error
-    assert "geometry.canvas_size" in report.verification_error
+    assert report.ok               # the run itself is fine...
+    assert not report.changed      # ...because the bad fix was reverted
+    reasons = [skip.reason for skip in report.skipped]
+    assert any("rolled back" in reason and "geometry.canvas_size" in reason for reason in reasons)
+
+
+def test_rollback_leaves_other_fixes_in_place(registry):
+    """One rolled-back fix must not discard the good ones alongside it."""
+
+    class BreaksTheCanvas(Fixer):
+        rule_id = "color.no_gradients"
+        risk = Risk.SAFE
+        summary = "claims to drop gradients but wrecks the canvas size"
+
+        def apply(self, doc: SvgDocument) -> FixOutcome:
+            outcome = FixOutcome()
+            doc.root.set("width", "80cm")
+            outcome.add("broke the width")
+            return outcome
+
+    fixbase._FIXERS["color.no_gradients"] = BreaksTheCanvas
+
+    source = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="12cm" height="12cm">\n'
+        '  <defs><linearGradient id="unused"/></defs>\n'
+        '  <g id="a" fill="#000000"><path d="M10 10 L110 10 L110 110 L10 110 Z"/></g>\n'
+        "</svg>\n"
+    )
+    engine = FixEngine.from_profile_name("embroidery-basic")
+    report = engine.fix_source(source)
+
+    assert report.ok
+    assert "geometry.require_viewbox" in [fix.rule_id for fix in report.applied]
+    assert 'width="12cm"' in report.source_after      # the bad edit is gone
+    assert "linearGradient" in report.source_after    # and its fix was rolled back too
 
 
 @needs_renderer

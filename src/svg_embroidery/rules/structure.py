@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List
 
-from ..document import SVG_NS, XLINK_NS, SvgDocument
+from ..document import SVG_NS, XLINK_NS, SvgDocument, local_name
 from ..findings import Finding, Severity
 from .base import Rule, register
 
@@ -69,6 +69,66 @@ class NoRasterDataRule(Rule):
         if findings:
             return findings
         return [self.ok("No embedded raster data.")]
+
+
+#: Namespaces used by editors to stash their own state in the file.
+EDITOR_NAMESPACES = (
+    "http://www.inkscape.org/namespaces/inkscape",
+    "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd",
+    "http://ns.adobe.com/AdobeIllustrator/10.0/",
+    "http://ns.adobe.com/AdobeSVGViewerExtensions/3.0/",
+)
+
+#: Editor attributes worth keeping: these describe the *drawing*, not the
+#: editing session, and other rules read them to find layers.
+STRUCTURAL_EDITOR_ATTRIBUTES = ("groupmode", "label")
+
+
+def _editor_namespace(tag: str) -> bool:
+    return any(tag.startswith("{" + namespace + "}") for namespace in EDITOR_NAMESPACES)
+
+
+@register
+class EditorMetadataRule(Rule):
+    id = "document.no_editor_metadata"
+    summary = "No leftover editor state in the file"
+    params = {"keep_attributes": list(STRUCTURAL_EDITOR_ATTRIBUTES)}
+    default_severity = Severity.WARNING
+
+    def check(self, doc: SvgDocument) -> Iterable[Finding]:
+        keep = {str(name) for name in self.config["keep_attributes"]}
+        elements: List[str] = []
+        attributes = 0
+
+        for node in doc.nodes:
+            if node.tag == "metadata" or _editor_namespace(node.element.tag):
+                elements.append(node.tag)
+                continue
+            for name in node.element.attrib:
+                if _editor_namespace(name) and local_name(name) not in keep:
+                    attributes += 1
+
+        for name in doc.root.attrib:
+            if _editor_namespace(name) and local_name(name) not in keep:
+                attributes += 1
+
+        if not elements and not attributes:
+            return [self.ok("No editor metadata.")]
+
+        parts = []
+        if elements:
+            parts.append(f"{len(elements)} element(s) ({', '.join(sorted(set(elements)))})")
+        if attributes:
+            parts.append(f"{attributes} attribute(s)")
+        return [
+            self.fail(
+                "Editor metadata left in the file: " + " and ".join(parts) + ".",
+                hint="It does not draw anything, but it bloats the upload and can carry "
+                "your file name and user paths.",
+                elements=sorted(set(elements)),
+                attributes=attributes,
+            )
+        ]
 
 
 @register

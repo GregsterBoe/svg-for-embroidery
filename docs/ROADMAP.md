@@ -245,13 +245,66 @@ covered by tests.
 
 </details>
 
-### A3. Safe fixes · size M
+### A3. Safe fixes · ✅ CLEARED
+
+Five fixers, every one appearance-preserving and every one held to
+`verify_fixer()`:
+
+| Rule | Fix |
+| --- | --- |
+| `geometry.canvas_size` | scale width/height into the allowed range |
+| `geometry.require_viewbox` | add the viewBox implied by width/height |
+| `color.no_gradients` | delete gradient/pattern definitions nothing references |
+| `element.forbidden` | remove forbidden elements that draw nothing |
+| `document.no_editor_metadata` | strip editor state, keeping layer annotations |
+
+**The recurring trick: only remove what was never drawing.** An unreferenced
+`<linearGradient>` in `<defs>`, a `<filter>` nothing points at, a hidden
+`<image>` — all invisible, so deleting them cannot change the picture, and it is
+frequently the *only* reason the file tripped the rule. Anything actually on the
+canvas is left alone with a reason: *"`<text>` are part of the artwork; removing
+them would delete visible content, so that is a manual decision."* Replacing a
+live gradient with flat colour is a real change to the design — that is A4.
+
+**Canvas scaling is safe because the viewBox stays put.** Only width and height
+move, so every coordinate inside is untouched and the design is simply presented
+at a different physical size — zero pixels differ. A file with no viewBox gets
+the implied one first; without that, changing width/height would enlarge the
+canvas *around* the artwork instead of scaling it, which is a visible change and
+not what anyone means by "make it bigger".
+
+Two things the batch forced, both worth having:
+
+- **Per-fix rollback in the engine.** Scaling a design down makes its strokes
+  physically thinner, which can push them under the minimum width. Each fix is
+  now re-checked on its own and reverted if it would introduce errors, instead
+  of one bad fix failing the whole run. The report says
+  `rolled back: it would introduce errors in stroke.min_width`.
+- **Surgical attribute removal in the writer.** Stripping two `inkscape:*`
+  attributes counted as "the root was edited", so a fourteen-line Inkscape
+  `<svg>` tag collapsed onto one line — a wall of diff for a two-line change.
+  When the only change to an element is attributes being *removed*, the writer
+  now cuts them out of the original tag text and keeps the author's layout.
+
+**New rule: `document.no_editor_metadata`** (warning, in `embroidery-basic`).
+Editor state does not render, bloats the upload, and `sodipodi:docname` carries
+the file name from the machine it was drawn on. `inkscape:groupmode` and
+`inkscape:label` are deliberately kept — `structure.color_layers` reads them to
+find layers, so stripping them would change a verdict.
+
+**Not done, with reasons.** *Colour notation normalisation* was on the list but
+has no home: colours are already normalised internally for counting, so `white`
+and `#FFF` are one colour to every rule, and no rule can fail on notation. A
+fixer needs a failing rule to attach to. It would be pure cosmetics, so it is
+dropped rather than given a rule invented to justify it.
+
+<details>
+<summary>Original plan for this step</summary>
 
 The first real batch — all of them appearance-preserving:
 
 - `geometry.require_viewbox` — derive `viewBox` from width/height
 - `geometry.canvas_size` — scale the canvas uniformly into the allowed range
-  (change `width`/`height`, keep `viewBox`; the artwork is untouched)
 - `color.*` — normalise colour notation
 - `element.forbidden: filter` — drop filters and unreferenced `<defs>`
 - strip editor metadata (Inkscape/Illustrator private namespaces)
@@ -260,6 +313,8 @@ The first real batch — all of them appearance-preserving:
 no other rule's error count increases; `fix(fix(x)) == fix(x)`; visual
 difference is zero. ~~Make these four assertions a shared test helper~~ — A2
 shipped it as `fixes.verify_fixer()`; every fixer here just calls it.
+
+</details>
 
 ### A4. Lossy fixes · size L
 

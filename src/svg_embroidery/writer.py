@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 from xml.etree import ElementTree
 
 from .document import _XMLNS_RE, XML_NS, SourceFormat, SvgDocument, VerbatimIndex
@@ -130,6 +130,53 @@ class _PrefixResolver:
         return f"{prefix}:{local}" if prefix else local
 
 
+_ATTRIBUTE_RE = re.compile(r"""\s+([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')""")
+
+
+def _tag_without_attributes(start_tag: str, drop: Sequence[str]) -> Optional[str]:
+    """Cut named attributes out of a literal start tag, keeping its layout.
+
+    Returns ``None`` if any of them cannot be found, so the caller rebuilds the
+    tag rather than writing something half-edited.
+    """
+    remaining = set(drop)
+    pieces: List[str] = []
+    position = 0
+    for match in _ATTRIBUTE_RE.finditer(start_tag):
+        if match.group(1) in remaining:
+            pieces.append(start_tag[position : match.start()])
+            position = match.end()
+            remaining.discard(match.group(1))
+    if remaining:
+        return None
+    pieces.append(start_tag[position:])
+    return "".join(pieces)
+
+
+def _reusable_start_tag(
+    element: ElementTree.Element,
+    verbatim: Optional[VerbatimIndex],
+    resolver: _PrefixResolver,
+) -> Optional[Tuple[str, bool]]:
+    """The element's original start tag, if it can still be used verbatim.
+
+    Either nothing changed, or the only change was attributes being removed —
+    which is scissors work on the original text.
+    """
+    if verbatim is None or id(element) not in verbatim.spans:
+        return None
+    source_tag, self_closing = verbatim.text_for(element)
+    if verbatim.unchanged(element):
+        return source_tag, self_closing
+
+    dropped = verbatim.removed_attributes(element)
+    if dropped is None:
+        return None
+    names = [resolver.qualify(key, attribute=True) for key in dropped]
+    edited = _tag_without_attributes(source_tag, names)
+    return (edited, self_closing) if edited is not None else None
+
+
 def _write_element(
     element: ElementTree.Element,
     out: List[str],
@@ -155,8 +202,9 @@ def _write_element(
 
     # An untouched element is reproduced exactly as the author wrote it, so a
     # fix produces a diff of the lines it actually changed and nothing else.
-    if verbatim is not None and verbatim.unchanged(element):
-        source_tag, self_closing = verbatim.text_for(element)
+    reusable = _reusable_start_tag(element, verbatim, resolver)
+    if reusable is not None:
+        source_tag, self_closing = reusable
         out.append(source_tag)
         if not self_closing:
             if element.text:
@@ -201,15 +249,18 @@ def _declarations(nsmap: Dict[str, str], resolver: _PrefixResolver) -> str:
     return "".join(parts)
 
 
-def _root_declared_prefixes(verbatim: Optional[VerbatimIndex], root) -> Optional[set]:
+def _root_declared_prefixes(start_tag: Optional[str]) -> Optional[set]:
     """Prefixes declared on the root's own start tag, or ``None`` if unknown."""
-    if verbatim is None or not verbatim.unchanged(root):
+    if start_tag is None:
         return None
-    start_tag, _ = verbatim.text_for(root)
     return {match.group(1) or "" for match in _XMLNS_RE.finditer(start_tag)} | {"", "xml"}
 
 
-def _serialize_body(doc: SvgDocument, resolver: _PrefixResolver, keep_root: bool) -> str:
+def _serialize_body(
+    doc: SvgDocument,
+    resolver: _PrefixResolver,
+    root_tag: Optional[Tuple[str, bool]],
+) -> str:
     fmt = doc.format
     root = doc.root
     verbatim = doc.verbatim
@@ -221,8 +272,8 @@ def _serialize_body(doc: SvgDocument, resolver: _PrefixResolver, keep_root: bool
     for child in children:
         _write_element(child, body, resolver, verbatim=verbatim)
 
-    if keep_root:
-        start_tag, self_closing = verbatim.text_for(root)  # type: ignore[union-attr]
+    if root_tag is not None:
+        start_tag, self_closing = root_tag
         if self_closing:
             return start_tag
         return start_tag + "".join(body) + f"</{_source_tag_name(start_tag)}>"
@@ -247,20 +298,19 @@ def serialize(doc: SvgDocument) -> str:
             "the declaration. Refusing to write."
         )
 
-    declared_on_root = _root_declared_prefixes(doc.verbatim, doc.root)
-    keep_root = declared_on_root is not None
-
     resolver = _PrefixResolver(fmt.nsmap)
-    rendered = _serialize_body(doc, resolver, keep_root)
+    root_tag = _reusable_start_tag(doc.root, doc.verbatim, resolver)
+    declared_on_root = _root_declared_prefixes(root_tag[0] if root_tag else None)
+    rendered = _serialize_body(doc, resolver, root_tag)
 
     # Keeping the original root tag is only safe while every prefix a rewritten
     # element needs is declared there. A declaration that lived on a rewritten
     # element itself is gone, so fall back to hoisting them all to the root.
-    if keep_root and (
+    if root_tag is not None and (
         resolver.generated or not resolver.used_in_rewrite <= (declared_on_root or set())
     ):
         resolver = _PrefixResolver(fmt.nsmap)
-        rendered = _serialize_body(doc, resolver, keep_root=False)
+        rendered = _serialize_body(doc, resolver, root_tag=None)
 
     if "\x00" in rendered:
         rendered = rendered.replace("\x00", _declarations(fmt.nsmap, resolver), 1)

@@ -38,6 +38,9 @@ rules:
 
   - id: document.no_raster
 
+  - id: document.no_editor_metadata
+    severity: warning
+
   - id: path.closed
     params:
       check_subpaths: true

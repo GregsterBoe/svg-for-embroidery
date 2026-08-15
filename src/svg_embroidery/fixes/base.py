@@ -90,10 +90,16 @@ class Fixer:
     :meth:`apply`, mutating the document's XML tree in place.
     """
 
-    #: The rule this repairs. One fixer per rule id.
+    #: The rule this repairs. A rule may have several fixers at different
+    #: risk levels — deleting a dead gradient is safe, replacing a live one
+    #: with flat colour is not.
     rule_id: str = ""
     risk: Risk = Risk.SAFE
     summary: str = ""
+    #: Fraction of the image this fix may change (0 = must be pixel-identical).
+    #: A lossy fix declares how much it is allowed to move; the engine holds it
+    #: to that, so "lossy" never means "anything goes".
+    visual_budget: float = 0.0
 
     def __init__(self, rule: Rule) -> None:
         if rule.id != self.rule_id:  # pragma: no cover - engine pairs these up
@@ -109,31 +115,36 @@ class Fixer:
         return f"{self.rule_id} [{self.risk.value}] {self.summary}"
 
 
-_FIXERS: Dict[str, Type[Fixer]] = {}
+_FIXERS: Dict[str, List[Type[Fixer]]] = {}
 
 
 def register_fixer(cls: Type[Fixer]) -> Type[Fixer]:
     """Class decorator adding a fixer to the registry."""
     if not cls.rule_id:
         raise FixerError(f"{cls.__name__} must set rule_id")
-    if cls.rule_id in _FIXERS:
-        raise FixerError(f"a fixer for '{cls.rule_id}' is already registered")
-    _FIXERS[cls.rule_id] = cls
+    existing = _FIXERS.setdefault(cls.rule_id, [])
+    if any(other.risk is cls.risk for other in existing):
+        raise FixerError(
+            f"a {cls.risk.value} fixer for '{cls.rule_id}' is already registered"
+        )
+    existing.append(cls)
+    # Safest first: try the repair that cannot hurt before the one that can.
+    existing.sort(key=lambda fixer: fixer.risk.rank)
     return cls
 
 
-def fixer_class_for(rule_id: str) -> Optional[Type[Fixer]]:
-    return _FIXERS.get(rule_id)
+def fixer_classes_for(rule_id: str) -> List[Type[Fixer]]:
+    """Fixers for a rule, safest first."""
+    return list(_FIXERS.get(rule_id, ()))
 
 
-def build_fixer(rule: Rule) -> Optional[Fixer]:
-    """The fixer for a configured rule, or ``None`` if it has none."""
-    cls = _FIXERS.get(rule.id)
-    return cls(rule) if cls else None
+def build_fixers(rule: Rule) -> List[Fixer]:
+    """The configured fixers for a rule, safest first."""
+    return [cls(rule) for cls in fixer_classes_for(rule.id)]
 
 
 def available_fixers() -> List[Type[Fixer]]:
-    return [_FIXERS[key] for key in sorted(_FIXERS)]
+    return [cls for key in sorted(_FIXERS) for cls in _FIXERS[key]]
 
 
 def parse_risks(values) -> "frozenset[Risk]":

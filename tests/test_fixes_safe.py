@@ -30,9 +30,11 @@ def size_mm(source):
 
 # -- every safe fixer keeps its promise ------------------------------------
 
-def test_all_registered_fixers_are_safe_for_now():
-    """A4 introduces lossy fixes; until then every fixer must be safe."""
-    assert {fixer.risk for fixer in available_fixers()} == {Risk.SAFE}
+def test_a_default_run_only_applies_safe_fixes():
+    """Lossy repairs exist since A4, but must never run without being asked."""
+    engine = FixEngine.from_profile_name("embroidery-basic")
+    assert engine.allow == {Risk.SAFE}
+    assert any(fixer.risk is Risk.SAFE for fixer in available_fixers())
 
 
 @pytest.mark.parametrize(

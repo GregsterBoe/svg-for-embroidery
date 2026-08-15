@@ -182,7 +182,7 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
 
 
 def _cmd_rules(args: argparse.Namespace) -> int:
-    from .fixes import fixer_class_for
+    from .fixes import fixer_classes_for
 
     rules = available_rules()
     if args.json:
@@ -196,14 +196,10 @@ def _cmd_rules(args: argparse.Namespace) -> int:
                         "summary": rule.summary,
                         "params": rule.params,
                         "default_severity": rule.default_severity.value,
-                        "fix": (
-                            None
-                            if fixer_class_for(rule.id) is None
-                            else {
-                                "risk": fixer_class_for(rule.id).risk.value,
-                                "summary": fixer_class_for(rule.id).summary,
-                            }
-                        ),
+                        "fixes": [
+                            {"risk": fixer.risk.value, "summary": fixer.summary}
+                            for fixer in fixer_classes_for(rule.id)
+                        ],
                     }
                     for rule in rules
                 ],
@@ -215,8 +211,7 @@ def _cmd_rules(args: argparse.Namespace) -> int:
     for rule in rules:
         print(f"{rule.id}  [{rule.default_severity.value}]")
         print(f"    {rule.summary}")
-        fixer = fixer_class_for(rule.id)
-        if fixer is not None:
+        for fixer in fixer_classes_for(rule.id):
             print(f"    fix [{fixer.risk.value}]: {fixer.summary}")
         if rule.params:
             for key, value in sorted(rule.params.items()):

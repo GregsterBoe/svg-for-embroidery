@@ -6,8 +6,9 @@ and ``rgb(255,255,255)`` all count as one colour when rules count them.
 
 from __future__ import annotations
 
+import math
 import re
-from typing import Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 # Values that mean "no paint" and therefore never count as a colour.
 NO_PAINT = {"none", "transparent", "currentcolor", "inherit", "context-fill", "context-stroke"}
@@ -130,3 +131,109 @@ def contrast_label(hex_color: str) -> str:
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
     return "light" if luminance > 0.6 else "dark"
+
+
+# -- perceptual colour space ----------------------------------------------
+#
+# Colour decisions are made in CIE Lab, not RGB. RGB distance does not match
+# what the eye sees: #00ff00 and #00cc00 are far apart numerically and nearly
+# indistinguishable, while #000080 and #008000 are the reverse. Reducing a
+# palette in RGB merges the wrong colours.
+
+_D65 = (0.95047, 1.0, 1.08883)
+
+
+def _linearise(channel: float) -> float:
+    return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+
+
+def _pivot(value: float) -> float:
+    return value ** (1 / 3) if value > (6 / 29) ** 3 else value / (3 * (6 / 29) ** 2) + 4 / 29
+
+
+def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    return (int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16))
+
+
+def rgb_to_hex(red: int, green: int, blue: int) -> str:
+    clamp = lambda value: max(0, min(255, int(round(value))))  # noqa: E731
+    return "#{:02x}{:02x}{:02x}".format(clamp(red), clamp(green), clamp(blue))
+
+
+def srgb_to_lab(hex_color: str) -> Tuple[float, float, float]:
+    """Convert ``#rrggbb`` to CIE L*a*b* (D65)."""
+    red, green, blue = (_linearise(value / 255) for value in hex_to_rgb(hex_color))
+    x = (red * 0.4124 + green * 0.3576 + blue * 0.1805) / _D65[0]
+    y = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / _D65[1]
+    z = (red * 0.0193 + green * 0.1192 + blue * 0.9505) / _D65[2]
+    fx, fy, fz = _pivot(x), _pivot(y), _pivot(z)
+    return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+
+
+def color_distance(left: str, right: str) -> float:
+    """Perceptual distance between two ``#rrggbb`` colours (CIE76)."""
+    a = srgb_to_lab(left)
+    b = srgb_to_lab(right)
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def nearest_color(target: str, candidates: Iterable[str]) -> Optional[str]:
+    """The perceptually closest candidate, ties broken by hex for determinism."""
+    options = sorted(set(candidates))
+    if not options:
+        return None
+    return min(options, key=lambda candidate: (color_distance(target, candidate), candidate))
+
+
+def blend_over(hex_color: str, alpha: float, backdrop: str = "#ffffff") -> str:
+    """Composite ``hex_color`` at ``alpha`` onto an opaque backdrop."""
+    alpha = max(0.0, min(1.0, alpha))
+    front = hex_to_rgb(hex_color)
+    back = hex_to_rgb(backdrop)
+    return rgb_to_hex(*(f * alpha + b * (1 - alpha) for f, b in zip(front, back)))
+
+
+def reduce_palette(weights: Dict[str, float], limit: int) -> Dict[str, str]:
+    """Merge colours until at most ``limit`` remain; returns old -> new.
+
+    Agglomerative: repeatedly merge the two perceptually closest colours, the
+    lighter-used one giving way to the more-used one. Deterministic, unlike
+    k-means with random seeding — the same file must always produce the same
+    palette, or the fix would not be idempotent.
+
+    Survivors are always colours that were *in the design*. Averaging clusters
+    would invent shades that no thread matches.
+    """
+    colors = sorted(weights)
+    if len(colors) <= limit:
+        return {color: color for color in colors}
+
+    # Each cluster: representative -> the originals that map to it.
+    clusters: Dict[str, List[str]] = {color: [color] for color in colors}
+    cluster_weight = dict(weights)
+
+    while len(clusters) > limit:
+        representatives = sorted(clusters)
+        best = None
+        for index, left in enumerate(representatives):
+            for right in representatives[index + 1 :]:
+                distance = color_distance(left, right)
+                if best is None or (distance, left, right) < best[0]:
+                    best = ((distance, left, right), left, right)
+        assert best is not None
+        _, left, right = best
+
+        # The more-used colour survives; ties go to the lower hex value.
+        keep, drop = (
+            (left, right)
+            if (cluster_weight[left], right) >= (cluster_weight[right], left)
+            else (right, left)
+        )
+        clusters[keep].extend(clusters.pop(drop))
+        cluster_weight[keep] += cluster_weight.pop(drop)
+
+    return {
+        original: representative
+        for representative, originals in clusters.items()
+        for original in originals
+    }

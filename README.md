@@ -248,8 +248,24 @@ print(report.diff())      # unified diff of just the changed lines
 | `document.no_editor_metadata` | strip editor state, keeping layer annotations |
 
 They only remove what was never being drawn, so anything visible is left alone
-with an explanation. `svgemb rules` marks which rules are fixable and at what
-risk; the `svgemb fix` command lands in A6.
+with an explanation.
+
+- **A4** — fixes that change the picture on purpose. These need `--allow lossy`,
+  and each declares how much of the image it may change:
+
+| Rule | Fix |
+| --- | --- |
+| `color.max_count` | merge near-duplicate colours (in CIE Lab) down to the limit |
+| `color.allowed_palette` | snap colours to the nearest stocked thread |
+| `color.no_transparency` | composite semi-transparent paint onto the page |
+| `path.closed` | close stroked contours whose ends nearly meet |
+
+Every colour substitution is reported, so you can disagree with it. Note that
+closing an *unstroked* contour is a safe fix, not a lossy one — a fill already
+renders open subpaths as closed, so writing the `Z` changes nothing.
+
+`svgemb rules` marks which rules are fixable and at what risk; the `svgemb fix`
+command lands in A6.
 
 Check both against your own files:
 
@@ -287,7 +303,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 220 tests
+python -m pytest        # 247 tests
 ```
 
 Layout:

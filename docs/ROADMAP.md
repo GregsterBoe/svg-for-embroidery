@@ -316,7 +316,52 @@ shipped it as `fixes.verify_fixer()`; every fixer here just calls it.
 
 </details>
 
-### A4. Lossy fixes · size L
+### A4. Lossy fixes · ✅ CLEARED
+
+Four repairs that change the picture on purpose. None of them run without
+`--allow lossy`.
+
+| Rule | Fix | Budget |
+| --- | --- | --- |
+| `color.max_count` | merge near-duplicate colours down to the limit | unbounded |
+| `color.allowed_palette` | snap colours to the nearest stocked thread | unbounded |
+| `color.no_transparency` | composite semi-transparent paint onto the page | 10% |
+| `path.closed` | close stroked contours whose ends nearly meet | 2% |
+
+**Every fix declares a visual budget**, so "lossy" never means "anything goes".
+The engine holds each one to the budget it declared rather than to a single
+global number — gap-closing that repaints 30% of the image is a bug, while
+recolouring that repaints 30% is the job. Safe fixes declare `0.0`, which is the
+same check as before, so the special case for `SAFE` disappeared.
+
+**Colours are merged in CIE Lab, and survivors are always real colours from the
+design.** Averaging a cluster would invent shades no thread matches. Merging is
+agglomerative rather than k-means: no random seeding, so the same file always
+produces the same palette — which is what makes the fix idempotent. Every
+substitution is reported: `#141414 -> #111111 (1 place(s))`.
+
+**Transparency flattening is exact where it matters.** 50% red on a white page
+*is* `#ff8080`, so the flattened file renders identically — verified. The
+approximation is bounded and stated: it composites against the page, not against
+whatever shape sits underneath, so overlaps drift, which is what the 10% budget
+is for. Group opacity is declined outright, because flattening it correctly
+means pushing it into every descendant.
+
+**One rule turned out to need two fixes**, which the registry did not allow:
+
+- an *unstroked* open path is already rendered closed — SVG fills treat every
+  subpath as closed — so writing the `Z` moves **zero pixels**. That is a safe
+  fix, and it now lands without `--allow lossy`.
+- a *stroked* open path would gain a visible closing segment, so that one is
+  lossy and only closes gaps under 1 mm. A wider gap means the shape was never
+  meant to close, and inventing an edge across it would be making up artwork.
+
+So the registry now holds a list per rule, safest first, and the engine tries
+the repair that cannot hurt before the one that can. `verify_fixer(..., risk=)`
+picks which to hold to the contract.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Now appearance changes, deliberately.
 
@@ -331,6 +376,8 @@ Now appearance changes, deliberately.
 
 **Done when:** the visual difference stays under an agreed budget, and every
 colour remap is reported.
+
+</details>
 
 ### A5. Geometry-dependent fixes · size L — **shared with Phase B**
 

@@ -16,9 +16,10 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from ..document import SvgDocument, local_name
+from ..document import SvgDocument, iter_subpaths, local_name
 from ..rules.structure import _editor_namespace
 from ..units import MM_PER_INCH, UNIT_TO_MM, USER_UNITS_PER_INCH, cm_to_mm, parse_length
+from ._path import close_subpath_text, rebuild, subpaths
 from ._dom import (
     is_unrendered,
     parent_map,
@@ -319,4 +320,54 @@ class StripEditorMetadata(Fixer):
 
         if not outcome.applied:
             return outcome.decline("no editor metadata found")
+        return outcome
+
+
+@register_fixer
+class CloseFilledPaths(Fixer):
+    """Close contours on paths that are filled but not stroked.
+
+    Safe because of how SVG fills work: an open subpath is filled *as if* it
+    were closed, so the closing edge is already on screen. Writing the ``Z``
+    only makes explicit what the renderer was doing anyway — zero pixels move,
+    whatever the size of the gap.
+
+    Stroked paths are a different matter: there the closing segment is a line
+    that would actually be drawn, so it goes through the lossy fixer with a gap
+    threshold.
+    """
+
+    rule_id = "path.closed"
+    risk = Risk.SAFE
+    summary = "close filled contours (a fill already renders them closed)"
+
+    def apply(self, doc: SvgDocument) -> FixOutcome:
+        outcome = FixOutcome()
+        stroked = 0
+
+        for node in doc.by_tag("path"):
+            if node.paint("stroke") is not None or node.paint_reference("stroke") is not None:
+                stroked += 1
+                continue
+            d = (node.element.get("d") or "").strip()
+            if not d:
+                continue
+
+            chunks = list(iter_subpaths(d))
+            changed = False
+            for info in subpaths(d):
+                if not info.closed and info.index < len(chunks):
+                    chunks[info.index] = close_subpath_text(chunks[info.index])
+                    changed = True
+            if changed:
+                node.element.set("d", rebuild(chunks))
+                outcome.add("closed the contour(s)", location=node.location)
+
+        if not outcome.applied:
+            if stroked:
+                return outcome.decline(
+                    f"{stroked} open path(s) are stroked, so closing them draws a visible "
+                    "segment — that needs --allow lossy"
+                )
+            return outcome.decline("no filled contour needs closing")
         return outcome

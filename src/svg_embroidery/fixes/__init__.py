@@ -19,8 +19,8 @@ from .base import (  # noqa: F401
     FixerError,
     Risk,
     available_fixers,
-    build_fixer,
-    fixer_class_for,
+    build_fixers,
+    fixer_classes_for,
     parse_risks,
     register_fixer,
 )
@@ -28,7 +28,7 @@ from .engine import AppliedFix, FixEngine, FixReport, SkippedFix  # noqa: F401
 from .verify import FixVerification, verify_fixer, verify_no_op  # noqa: F401
 
 # Importing the modules registers the fixers.
-from . import safe  # noqa: F401,E402
+from . import lossy, safe  # noqa: F401,E402
 
 __all__ = [
     "AppliedFix",
@@ -43,8 +43,8 @@ __all__ = [
     "Risk",
     "SkippedFix",
     "available_fixers",
-    "build_fixer",
-    "fixer_class_for",
+    "build_fixers",
+    "fixer_classes_for",
     "parse_risks",
     "register_fixer",
     "verify_fixer",

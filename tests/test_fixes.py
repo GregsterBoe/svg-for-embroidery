@@ -46,7 +46,7 @@ needs_renderer = pytest.mark.skipif(
 @pytest.fixture
 def registry():
     """Register test fixers without leaking into other tests."""
-    saved = dict(fixbase._FIXERS)
+    saved = {key: list(value) for key, value in fixbase._FIXERS.items()}
     yield fixbase._FIXERS
     fixbase._FIXERS.clear()
     fixbase._FIXERS.update(saved)
@@ -139,7 +139,7 @@ def test_verify_rejects_a_sample_that_does_not_fail():
 
 
 def test_verify_reports_a_missing_fixer():
-    result = verify_fixer(NO_VIEWBOX, "path.closed")  # closing paths is a lossy fix (A4)
+    result = verify_fixer(NO_VIEWBOX, "stroke.min_width")  # widening strokes needs A5
     assert not result.ok
     assert "no fixer is registered" in result.summary()
 
@@ -202,7 +202,7 @@ def test_rules_without_a_fixer_are_reported_as_such():
     engine = FixEngine.from_profile_name("embroidery-basic")
     report = engine.fix_source(TOO_MANY_COLOURS)
     reasons = {skip.rule_id: skip.reason for skip in report.skipped}
-    assert reasons["color.max_count"] == "no automatic fix available"
+    assert reasons["structure.color_layers"] == "no automatic fix available"
 
 
 # -- the engine polices its own output -------------------------------------
@@ -222,7 +222,7 @@ def test_a_fix_that_would_introduce_errors_is_rolled_back(registry):
             outcome.add("added a viewBox and wrecked the width")
             return outcome
 
-    fixbase._FIXERS["geometry.require_viewbox"] = OverEnthusiastic
+    fixbase._FIXERS["geometry.require_viewbox"] = [OverEnthusiastic]
 
     engine = FixEngine.from_profile_name("embroidery-basic")
     report = engine.fix_source(NO_VIEWBOX)
@@ -247,7 +247,7 @@ def test_rollback_leaves_other_fixes_in_place(registry):
             outcome.add("broke the width")
             return outcome
 
-    fixbase._FIXERS["color.no_gradients"] = BreaksTheCanvas
+    fixbase._FIXERS["color.no_gradients"] = [BreaksTheCanvas]
 
     source = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="12cm" height="12cm">\n'
@@ -281,7 +281,7 @@ def test_a_safe_fix_that_moves_a_pixel_is_caught(registry):
                 outcome.add("repainted", node.location)
             return outcome
 
-    fixbase._FIXERS["geometry.require_viewbox"] = Liar
+    fixbase._FIXERS["geometry.require_viewbox"] = [Liar]
 
     engine = FixEngine.from_profile_name("embroidery-basic")
     report = engine.fix_source(NO_VIEWBOX)
@@ -316,7 +316,7 @@ def test_non_idempotent_fixer_fails_verification(registry):
             outcome.add("added a marker")
             return outcome
 
-    fixbase._FIXERS["geometry.require_viewbox"] = NeverSatisfied
+    fixbase._FIXERS["geometry.require_viewbox"] = [NeverSatisfied]
 
     result = verify_fixer(NO_VIEWBOX, "geometry.require_viewbox")
     assert not result.idempotent

@@ -19,7 +19,7 @@ from ..findings import Report, Severity
 from ..profiles import Profile, load_profile
 from ..visual import Difference, RenderError, visual_difference
 from ..writer import serialize
-from .base import DEFAULT_ALLOWED, Change, Fixer, Risk, build_fixer
+from .base import DEFAULT_ALLOWED, Change, Risk, build_fixers
 
 
 @dataclass
@@ -27,6 +27,8 @@ class AppliedFix:
     rule_id: str
     risk: Risk
     changes: List[Change]
+    #: How much of the image this fix was allowed to change.
+    budget: float = 0.0
 
     def __str__(self) -> str:
         return f"{self.rule_id} [{self.risk.value}]: " + "; ".join(
@@ -127,14 +129,14 @@ class FixEngine:
         allow: Sequence[Risk] = tuple(DEFAULT_ALLOWED),
         only: Optional[Set[str]] = None,
         verify: bool = True,
-        visual_budget: float = 0.0,
+        visual_budget: Optional[float] = None,
     ) -> None:
         self.profile = profile
         self.checker = Checker(profile)
         self.allow: FrozenSet[Risk] = frozenset(allow)
         self.only = set(only) if only else None
         self.verify = verify
-        #: Fraction of pixels a non-safe fix may change before it counts as wrong.
+        #: Overrides each fixer's declared budget when set.
         self.visual_budget = visual_budget
 
     @classmethod
@@ -183,16 +185,24 @@ class FixEngine:
         if report.visual is None or not report.applied:
             return
 
+        # Each fix declares how much of the image it may move; the run is held
+        # to the most generous one it actually used, unless the caller set a
+        # tighter budget explicitly.
+        budget = (
+            self.visual_budget
+            if self.visual_budget is not None
+            else max(fix.budget for fix in report.applied)
+        )
+        if report.visual.within(budget):
+            return
         riskiest = max((fix.risk for fix in report.applied), key=lambda r: r.rank)
         if riskiest is Risk.SAFE:
-            if not report.visual.identical:
-                report.verification_error = (
-                    f"a safe fix changed the rendered image ({report.visual})"
-                )
-        elif not report.visual.within(self.visual_budget):
             report.verification_error = (
-                f"visual change {report.visual} exceeds the budget "
-                f"({self.visual_budget:.2%})"
+                f"a safe fix changed the rendered image ({report.visual})"
+            )
+        else:
+            report.verification_error = (
+                f"visual change {report.visual} exceeds the budget ({budget:.2%})"
             )
 
     # -- the run ----------------------------------------------------------
@@ -214,55 +224,61 @@ class FixEngine:
             if rule.id not in failing:
                 continue
 
-            fixer: Optional[Fixer] = build_fixer(rule)
-            if fixer is None:
+            fixers = build_fixers(rule)
+            if not fixers:
                 report.skipped.append(SkippedFix(rule.id, "no automatic fix available"))
                 continue
             if self.only is not None and rule.id not in self.only:
-                report.skipped.append(SkippedFix(rule.id, "not selected", fixer.risk))
-                continue
-            if fixer.risk not in self.allow:
-                report.skipped.append(
-                    SkippedFix(rule.id, f"needs --allow {fixer.risk.value}", fixer.risk)
-                )
+                report.skipped.append(SkippedFix(rule.id, "not selected", fixers[0].risk))
                 continue
 
-            outcome = fixer.apply(doc)
-            if not outcome.applied:
-                report.skipped.append(
-                    SkippedFix(
-                        rule.id, outcome.declined or "fixer made no changes", fixer.risk
+            # Safest first: a dead gradient is deleted before anyone considers
+            # flattening a live one.
+            for fixer in fixers:
+                if fixer.risk not in self.allow:
+                    report.skipped.append(
+                        SkippedFix(rule.id, f"needs --allow {fixer.risk.value}", fixer.risk)
                     )
-                )
-                doc = parse_svg(current_source, path=path)  # drop any partial edits
-                continue
+                    continue
 
-            # Re-parse between fixers: the document model caches resolved styles
-            # and geometry, so the next fixer must not read a stale view.
-            candidate_source = serialize(doc)
-            candidate = parse_svg(candidate_source, path=path)
-
-            # Each fix stands on its own. Scaling a canvas down, for instance,
-            # can push strokes under the minimum width — that fix gets rolled
-            # back rather than poisoning the whole run.
-            regression = self._regression(
-                self._errors_per_rule(before),
-                self._errors_per_rule(self.checker.check_document(candidate)),
-            )
-            if regression:
-                report.skipped.append(
-                    SkippedFix(
-                        rule.id,
-                        f"rolled back: it would introduce errors in {regression}",
-                        fixer.risk,
+                outcome = fixer.apply(doc)
+                if not outcome.applied:
+                    report.skipped.append(
+                        SkippedFix(
+                            rule.id, outcome.declined or "fixer made no changes", fixer.risk
+                        )
                     )
-                )
-                doc = parse_svg(current_source, path=path)
-                continue
+                    doc = parse_svg(current_source, path=path)  # drop partial edits
+                    continue
 
-            report.applied.append(AppliedFix(rule.id, fixer.risk, outcome.changes))
-            current_source = candidate_source
-            doc = candidate
+                # Re-parse between fixers: the document model caches resolved
+                # styles and geometry, so the next one must not read a stale view.
+                candidate_source = serialize(doc)
+                candidate = parse_svg(candidate_source, path=path)
+
+                # Each fix stands on its own. Scaling a canvas down, for
+                # instance, can push strokes under the minimum width — that fix
+                # gets rolled back rather than poisoning the whole run.
+                regression = self._regression(
+                    self._errors_per_rule(before),
+                    self._errors_per_rule(self.checker.check_document(candidate)),
+                )
+                if regression:
+                    report.skipped.append(
+                        SkippedFix(
+                            rule.id,
+                            f"rolled back: it would introduce errors in {regression}",
+                            fixer.risk,
+                        )
+                    )
+                    doc = parse_svg(current_source, path=path)
+                    continue
+
+                report.applied.append(
+                    AppliedFix(rule.id, fixer.risk, outcome.changes, fixer.visual_budget)
+                )
+                current_source = candidate_source
+                doc = candidate
 
         report.source_after = current_source
         report.after = self.checker.check_document(doc)

@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence
 
 from ..profiles import load_profile
 from ..visual import Difference
-from .base import Risk, fixer_class_for
+from .base import Risk, fixer_classes_for
 from .engine import FixEngine
 
 
@@ -68,25 +68,33 @@ def verify_fixer(
     source: str,
     rule_id: str,
     profile: str = "embroidery-basic",
-    visual_budget: float = 0.0,
+    risk: Optional[Risk] = None,
+    visual_budget: Optional[float] = None,
     extra_profiles: Sequence[str] = (),
 ) -> FixVerification:
     """Run ``rule_id``'s fixer over ``source`` and check all four invariants.
 
     ``source`` must be a document that actually fails ``rule_id``, otherwise
-    there is nothing to prove and the verification reports that.
+    there is nothing to prove and the verification reports that. When a rule has
+    fixers at several risk levels, ``risk`` picks one; otherwise all of them run
+    together, as they would in a real fix.
     """
-    fixer_class = fixer_class_for(rule_id)
+    candidates = fixer_classes_for(rule_id)
+    if risk is not None:
+        candidates = [cls for cls in candidates if cls.risk is risk]
+
     result = FixVerification(rule_id=rule_id)
-    if fixer_class is None:
-        result.notes.append(f"no fixer is registered for '{rule_id}'")
+    if not candidates:
+        which = f" at risk '{risk.value}'" if risk else ""
+        result.notes.append(f"no fixer is registered for '{rule_id}'{which}")
         return result
+    fixer_class = candidates[-1]  # the riskiest one actually in play
     result.risk = fixer_class.risk
 
     loaded = load_profile(profile)
     engine = FixEngine(
         loaded,
-        allow=[fixer_class.risk],
+        allow=[cls.risk for cls in candidates],
         only={rule_id},
         visual_budget=visual_budget,
     )
@@ -123,7 +131,7 @@ def verify_fixer(
     after_errors = {f.rule_id for f in report.after.errors}
     result.no_regressions = not (after_errors - before_errors)
     for other in extra_profiles:
-        other_engine = FixEngine(load_profile(other), allow=[fixer_class.risk])
+        other_engine = FixEngine(load_profile(other), allow=[cls.risk for cls in candidates])
         before_other = other_engine.checker.check_source(report.source_before)
         after_other = other_engine.checker.check_source(report.source_after)
         if len(after_other.errors) > len(before_other.errors):
@@ -138,12 +146,11 @@ def verify_fixer(
 
     # 4. the visual claim holds
     result.visual = report.visual
+    budget = visual_budget if visual_budget is not None else fixer_class.visual_budget
     if report.visual is None:
         result.visual_ok = True  # no renderer: unmeasured, not failed
-    elif fixer_class.risk is Risk.SAFE:
-        result.visual_ok = report.visual.identical
     else:
-        result.visual_ok = report.visual.within(visual_budget)
+        result.visual_ok = report.visual.within(budget)
 
     return result
 

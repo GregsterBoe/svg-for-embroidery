@@ -208,18 +208,23 @@ def test_the_metrics_separate_drawable_artwork_from_shading(corpus_rows):
 
 
 @pytest.mark.slow
-def test_the_corpus_records_the_gap_b3_has_to_close(corpus_rows):
-    """A scan of flat artwork is *drawable*, and currently measures as junk.
+def test_the_corpus_records_the_gap_b3_closed(corpus_rows):
+    """A scan of flat artwork is *drawable*, and measures as junk until it is cleaned.
 
     Grain means no pixel equals its neighbour, so ``flat`` collapses and the
-    quantiser turns speckle into unstitchable detail. That is not a wrong
-    measurement — it is an accurate one of an unpreprocessed image, and it is
-    the whole reason B3's denoising stage exists. When B3 lands this assertion
-    should start failing, which is the point of writing it down.
+    quantiser turns speckle into unstitchable detail. That was never a wrong
+    measurement — it is an accurate one of an *unpreprocessed* image, and it is
+    the whole reason B3's denoising stage exists.
+
+    So this still holds, and should: the raw numbers describe the raw image.
+    What changed is that there is now a pipeline that makes the same file
+    measure like the drawing it is — see
+    ``test_preprocess.test_a_scanned_line_drawing_now_measures_like_the_flat_artwork_it_is``,
+    which is where the other half of this assertion lives.
     """
     rows = corpus_rows
     assert rows["scan-clean"].expect == "good"
-    assert rows["scan-clean"].flat < 0.1, "if this now passes, B3 worked — update the test"
+    assert rows["scan-clean"].flat < 0.1
     assert rows["scan-clean"].thin > 0.5
 
 

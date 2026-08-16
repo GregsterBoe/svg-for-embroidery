@@ -66,6 +66,10 @@ svgemb profiles                                # list all rulesets
 svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
 
+svgemb bench                                   # measure the image corpus (B1)
+svgemb bench --preprocess                      # the same, after B3 cleans each image
+svgemb bench --tracers                         # compare every installed tracer (B0)
+
 svgemb serve                                   # local web UI on http://localhost:8000
 svgemb roundtrip design.svg                    # verify read/write changes nothing
 svgemb doctor                                  # what this machine can do
@@ -538,6 +542,72 @@ owes, so this is the same gap B1 recorded — and the report says the word
 "denoising" out loud rather than implying the artwork is at fault. The error is
 one band, in the cautious direction, and it is pinned by a test that will start
 failing when B3 lands.
+
+**B3 — the preprocessing pipeline, which is where the quality was.** Six stages,
+all pure Python: upscale a tiny source, flatten the background, denoise with a
+bilateral filter, normalise contrast when it is faded, quantise to the profile's
+colour budget in CIE Lab, drop specks. Each takes its settings from the profile
+rather than from a constant.
+
+```bash
+make prep           # or: svgemb bench --preprocess
+svgemb bench --tracers --preprocess
+```
+
+The gate B0 set was *potrace reaching vtracer's number on scans, without
+vtracer's habit of deleting thin strokes*:
+
+| | potrace `fit` raw | preprocessed | vtracer, for scale |
+| --- | --- | --- | --- |
+| `scan-clean` | 0.253 | **0.032** | 0.030 |
+| `scan-noisy` | 0.421 | **0.029** | 0.848 |
+| `scan-skewed` | 0.353 | **0.029** | 0.886 |
+| `line-art-thin` | 0.036 | **0.052** | 0.255 |
+| whole corpus | 0.108 | **0.074** | 0.141 |
+| paths / nodes | 6791 / 73883 | **2125 / 21405** | — |
+
+It reaches vtracer's number on all three scans and beats it on two, while thin
+line art costs 0.052 against vtracer's 0.255 — and the corpus needs **a third of
+the paths and a third of the nodes**, which is stitch count. `scan-clean` also
+stops measuring like junk: `flat` 0.001 → 0.907, `thin` 0.844 → 0.010, and
+triage now grades it **good**.
+
+Three stages were wrong first, and each mistake shaped the code:
+
+**A noise estimate must not read artwork as noise.** Sizing the filter from the
+*median* difference between neighbours puts `hatching` at 147 — crosshatch means
+half of all neighbours straddle a stroke, so the median lands mid-edge. At that
+width the filter blurs the drawing into grey tone. A low percentile can't be
+dragged up that way, and the result is capped so a filter that *would* cross a
+real edge cannot be built. The estimate also has to be taken **before** the
+background is flattened, or it measures the flat region instead of the image.
+
+**Contrast normalisation clips, and clipping manufactures flat pixels.** Applied
+unconditionally it posterised `gradient-linear` from 189 colours to 34 and moved
+a ramp from *hopeless* to *marginal* — preprocessing that makes an unconvertible
+image look convertible is worse than none. It now fires only below a measured
+threshold, which no corpus image trips.
+
+**Stage 6 despeckles; it does not open.** An opening at the profile's minimum
+width *is* Phase A's `geometry.min_feature_size` fixer, which is classified
+destructive and gated behind a flag naming the rule. Run silently here it took
+`line-art-thin` from 2.9% ink to 0.1% — vtracer's failure mode, reproduced. And
+then it turned out to have nothing to do: the filter has already removed the
+grain, so every setting aggressive enough to matter was eating artwork (42% of
+`hatching` at 3px). It ships off by default, for the dust a real scan has and a
+generated corpus does not.
+
+The single most valuable fix came from reading a palette. `scan-clean` was
+quantising to `#faf7f0` **and** `#f9f6ef` — 0.3 apart in CIE Lab, which is not
+two colours. Two entries alternating across one flat region put a boundary on
+every other pixel, so 2% of the image measured as *too fine to stitch*: a
+manufactured defect, and on its own enough to keep the file out of *good*.
+Merging entries closer than a just-noticeable difference is also what a shop
+wants, because a palette entry is a thread change.
+
+Costs, stated rather than buried: `hatching` (0.571 → 0.744) and
+`photo-landscape` (0.005 → 0.087) trace *worse*. Both are hopeless either way,
+and a tracer's fidelity to an image nobody can stitch is not worth optimising.
 
 The last empty column, "does it pass", waits for B6.
 

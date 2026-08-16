@@ -213,6 +213,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the corpus once per installed tracer and compare them (B0)",
     )
+    bench.add_argument(
+        "--preprocess",
+        action="store_true",
+        help="clean each image through B3's pipeline before measuring it; the "
+        "numbers then describe the cleaned image, so such a run is never "
+        "diffed against a baseline taken without it",
+    )
     bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
@@ -729,6 +736,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             entries,
             work_side=args.work_side,
             corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
+            preprocess=args.preprocess,
         )
         print(bench_module.render_tracer_comparison(runs, color=color))
         return 0
@@ -744,6 +752,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         work_side=args.work_side,
         corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
         backend=backend,
+        preprocess=args.preprocess,
     )
 
     # A subset run must never overwrite a whole-corpus baseline with three rows.

@@ -3,7 +3,7 @@
 
 PYTHON ?= python
 
-.PHONY: help test bench bench-save triage tracers corpus roundtrip doctor serve degraded
+.PHONY: help test bench bench-save triage prep tracers corpus roundtrip doctor serve degraded
 
 help:
 	@echo "make test         run the test suite"
@@ -11,6 +11,7 @@ help:
 	@echo "make bench        measure the image corpus against the baseline (B1)"
 	@echo "make bench-save   record the current numbers as the new baseline"
 	@echo "make triage       grade the corpus good/marginal/hopeless (B2)"
+	@echo "make prep         measure the corpus after B3 cleans each image"
 	@echo "make tracers      compare every installed tracer on the corpus (B0)"
 	@echo "make corpus       regenerate the corpus images"
 	@echo "make roundtrip    prove the writer returns files unchanged (A0 gate)"
@@ -37,6 +38,11 @@ bench-save:
 # is the "triage agrees with 'expect'" line at the foot of the table.
 triage:
 	$(PYTHON) -m svg_embroidery.cli bench --tracer none --no-compare
+
+# B3's gate: the same corpus, cleaned first. Compare the fit column against
+# 'make tracers' — that difference is what preprocessing is worth.
+prep:
+	$(PYTHON) -m svg_embroidery.cli bench --preprocess --no-compare
 
 # B0's instrument: the same corpus through every tracer this machine has.
 tracers:

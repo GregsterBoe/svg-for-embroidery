@@ -1,10 +1,11 @@
 {
   "version": 1,
-  "created": "2026-08-16T16:13:31Z",
+  "created": "2026-08-16T19:48:44Z",
   "corpus": "/home/gregster/Documents/Projects/embroidery/svg-for-embroidery/bench/corpus",
   "work_side": null,
   "tracer": "potracer",
   "tracer_version": "0.0.4",
+  "preprocess": false,
   "averages": {
     "flat": 0.49043296602387515,
     "quant": 0.3773375,
@@ -34,7 +35,7 @@
       "nodes": 132,
       "fit": 0.022575,
       "passes": null,
-      "trace_seconds": 0.0459,
+      "trace_seconds": 0.045,
       "unmeasured": "",
       "notes": []
     },
@@ -59,7 +60,7 @@
       "nodes": 64,
       "fit": 0.01775,
       "passes": null,
-      "trace_seconds": 0.0251,
+      "trace_seconds": 0.0247,
       "unmeasured": "",
       "notes": []
     },
@@ -84,7 +85,7 @@
       "nodes": 118,
       "fit": 0.017525,
       "passes": null,
-      "trace_seconds": 0.0352,
+      "trace_seconds": 0.0335,
       "unmeasured": "",
       "notes": []
     },
@@ -109,7 +110,7 @@
       "nodes": 109,
       "fit": 0.0076,
       "passes": null,
-      "trace_seconds": 0.022,
+      "trace_seconds": 0.0213,
       "unmeasured": "",
       "notes": []
     },
@@ -134,7 +135,7 @@
       "nodes": 477,
       "fit": 0.050325,
       "passes": null,
-      "trace_seconds": 0.0921,
+      "trace_seconds": 0.0894,
       "unmeasured": "",
       "notes": []
     },
@@ -159,7 +160,7 @@
       "nodes": 774,
       "fit": 0.03635,
       "passes": null,
-      "trace_seconds": 0.0799,
+      "trace_seconds": 0.0777,
       "unmeasured": "",
       "notes": []
     },
@@ -184,7 +185,7 @@
       "nodes": 22777,
       "fit": 0.570625,
       "passes": null,
-      "trace_seconds": 1.5937,
+      "trace_seconds": 1.565,
       "unmeasured": "",
       "notes": []
     },
@@ -209,7 +210,7 @@
       "nodes": 15086,
       "fit": 0.25255,
       "passes": null,
-      "trace_seconds": 0.931,
+      "trace_seconds": 0.9266,
       "unmeasured": "",
       "notes": []
     },
@@ -234,7 +235,7 @@
       "nodes": 15092,
       "fit": 0.4213,
       "passes": null,
-      "trace_seconds": 0.9396,
+      "trace_seconds": 0.9283,
       "unmeasured": "",
       "notes": []
     },
@@ -259,7 +260,7 @@
       "nodes": 14786,
       "fit": 0.352525,
       "passes": null,
-      "trace_seconds": 0.9343,
+      "trace_seconds": 0.9195,
       "unmeasured": "",
       "notes": []
     },
@@ -284,7 +285,7 @@
       "nodes": 1744,
       "fit": 0.0608,
       "passes": null,
-      "trace_seconds": 0.1213,
+      "trace_seconds": 0.1205,
       "unmeasured": "",
       "notes": []
     },
@@ -309,7 +310,7 @@
       "nodes": 22,
       "fit": 0.005,
       "passes": null,
-      "trace_seconds": 0.0109,
+      "trace_seconds": 0.011,
       "unmeasured": "",
       "notes": []
     },
@@ -334,7 +335,7 @@
       "nodes": 2078,
       "fit": 0.125375,
       "passes": null,
-      "trace_seconds": 0.1779,
+      "trace_seconds": 0.1762,
       "unmeasured": "",
       "notes": []
     },
@@ -359,7 +360,7 @@
       "nodes": 86,
       "fit": 0.0129,
       "passes": null,
-      "trace_seconds": 0.0269,
+      "trace_seconds": 0.0264,
       "unmeasured": "",
       "notes": []
     },
@@ -384,7 +385,7 @@
       "nodes": 50,
       "fit": 0.020625,
       "passes": null,
-      "trace_seconds": 0.0348,
+      "trace_seconds": 0.0341,
       "unmeasured": "",
       "notes": []
     },
@@ -409,7 +410,7 @@
       "nodes": 27,
       "fit": 0.0,
       "passes": null,
-      "trace_seconds": 0.011,
+      "trace_seconds": 0.0109,
       "unmeasured": "",
       "notes": []
     },
@@ -434,7 +435,7 @@
       "nodes": 67,
       "fit": 0.02355,
       "passes": null,
-      "trace_seconds": 0.0431,
+      "trace_seconds": 0.0428,
       "unmeasured": "",
       "notes": []
     },
@@ -459,7 +460,7 @@
       "nodes": 37,
       "fit": 0.1259765625,
       "passes": null,
-      "trace_seconds": 0.0047,
+      "trace_seconds": 0.0046,
       "unmeasured": "",
       "notes": [
         "thin: not measurable — at 3.12 mm/px the smallest kernel asks 9.4 mm, not the profile's 1.5 mm"
@@ -486,7 +487,7 @@
       "nodes": 156,
       "fit": 0.0138,
       "passes": null,
-      "trace_seconds": 0.0319,
+      "trace_seconds": 0.0321,
       "unmeasured": "",
       "notes": []
     },
@@ -511,7 +512,7 @@
       "nodes": 201,
       "fit": 0.021175,
       "passes": null,
-      "trace_seconds": 0.0308,
+      "trace_seconds": 0.0302,
       "unmeasured": "",
       "notes": []
     }

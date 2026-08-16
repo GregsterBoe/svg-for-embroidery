@@ -958,7 +958,113 @@ B2 ships knowing it under-rates scans and says so.
 > journey — upload, preview, sliders, download — and triage is one panel of it.
 > Adding a lone assess button now would be guessing at that layout twice.
 
-### B3. Preprocessing pipeline · size L
+### B3. Preprocessing pipeline · ✅ CLEARED
+
+Lives in `preprocess.py`, behind `svgemb bench --preprocess`. Six stages, all
+pure Python — it is pixel arithmetic, so the same judgement A1 made about
+decoding PNG applies and the conversion path does not vanish behind a compiler.
+
+**Gate met, and it is the one B0 sized.** `svgemb bench --tracers --preprocess`
+against the same command without it:
+
+| | potrace `fit` raw | preprocessed | vtracer, for scale |
+| --- | --- | --- | --- |
+| `scan-clean` | 0.253 | **0.032** | 0.030 |
+| `scan-noisy` | 0.421 | **0.029** | 0.848 |
+| `scan-skewed` | 0.353 | **0.029** | 0.886 |
+| `line-art-thin` | 0.036 | **0.052** | 0.255 |
+| whole corpus | 0.108 | **0.074** | 0.141 |
+| paths / nodes | 6791 / 73883 | **2125 / 21405** | — |
+
+The bar was *"potrace reaches vtracer's number on scans without vtracer's habit
+of deleting thin strokes"*. It reaches it on all three scans and beats it on two,
+while thin line art costs 0.052 against vtracer's 0.255 — and the whole corpus
+needs **a third of the paths and a third of the nodes**, which is stitch count.
+
+The other half of the gate was the measurement: `scan-clean` went from `flat`
+0.001 / `thin` 0.844 to **`flat` 0.907 / `thin` 0.010**, and B2 grades it
+**good**, which is what the manifest said a human would say all along.
+
+**Three stages were wrong first, and each mistake is the reason the code is
+shaped as it is.**
+
+*The noise estimate must not read artwork as noise.* Sizing the filter from the
+**median** difference between neighbouring pixels puts `hatching` at 147 —
+crosshatch means half of all neighbours straddle a stroke, so the median lands
+mid-edge. At that width the filter blurs across the strokes: the verdict stayed
+*hopeless*, but for the wrong reason and with the drawing turned to grey tone.
+A low percentile cannot be dragged up that way, however much of the image is
+edges, and the result is capped so that a filter which *would* cross a real edge
+cannot be built. Then the estimate has to be taken **before** the background is
+flattened — snapping the paper to one value sets half the pixels equal, and
+`scan-noisy` estimated 37 as it arrived and 0 once flattened, so the filter sized
+itself for an image with no grain and left the grain alone.
+
+*Contrast normalisation is off unless it is needed.* Stretching an image that
+already spans the range does nothing in the middle and clips at both ends, and
+clipping manufactures flat pixels: it posterised `gradient-linear` from 189
+colours to 34 and moved a ramp from *hopeless* to *marginal*. Preprocessing that
+makes an unconvertible image look convertible is worse than none. It now fires
+only below a measured threshold, which **no image in the corpus trips**, and is
+tested on a purpose-built faded fixture instead.
+
+*Stage 6 despeckles; it does not open.* The plan said "morphological open/close
+… removes specks and bridges thinner than `stroke.min_width`". But an opening at
+the minimum width **is** A5's `geometry.min_feature_size` fixer, which that step
+measured, classified **destructive**, and put behind a flag naming the rule —
+because it deletes any shape narrower than the needle, and a designer's hairline
+is a shape. Run silently here it took `line-art-thin` from 2.9% ink to 0.1%:
+vtracer's failure mode, faithfully reproduced. Dropping small *connected
+regions* keeps the hairline, because a stroke crossing the image is thin without
+being small.
+
+**And then stage 6 turned out to have nothing to do, which is a finding rather
+than a disappointment.** By the time it runs the bilateral filter has taken the
+grain out, so the only regions small enough to absorb were the fragments of thin
+line art — at 3 px it ate **42% of `hatching`**. Every setting that removed
+anything removed artwork. So it defaults to removing nothing, stays implemented
+and tested for the dust specks a *real* scan has and a generated corpus does not,
+and the detail-removal the plan imagined stays where A5 put it. The second pass
+of the filter is the same story in miniature: a third pass changes nothing on any
+image, so there are two.
+
+**The bug worth the most, found by reading a palette.** `scan-clean` came out of
+the quantiser holding `#faf7f0` **and** `#f9f6ef` — 0.3 apart in CIE Lab, which
+is not two colours. Median cut splits the paper in two whenever it has a spare
+entry and nowhere better to put it. The cost is not cosmetic: two entries
+alternating across one flat region put a boundary on every other pixel, so 2% of
+the image measured as *too fine to stitch* — an entirely manufactured defect,
+and on its own enough to keep the file out of *good*. Merging entries closer than
+a just-noticeable difference is also what a shop wants on its own terms, because
+a palette entry is a thread change.
+
+The matching fix on the same image: the corner flood fill cannot reach the paper
+**inside** a drawn ring, and no reading of that region calls it anything but
+background. Filling only what is connected stranded a quarter of the paper with
+its grain intact. The fill now *identifies* the colour and a snap *applies* it
+wherever it sits.
+
+**What it costs elsewhere, stated rather than buried.** `hatching` traces worse
+(0.571 → 0.744) and so does `photo-landscape` (0.005 → 0.087); both are
+*hopeless* either way, and a tracer's fidelity to an image nobody can stitch is
+not a number worth optimising. `line-art-thin` gives up 0.016 of `fit` to the
+contrast stretch, against 0.22–0.32 gained on each scan.
+
+> **B2's warning, checked rather than trusted.** B2 predicted that convergent
+> denoising pulls `hatching` *past* `scan-clean` — making the hopeless image look
+> better than the good one — and left the rule that if B3 moves the crosshatch
+> out of *hopeless*, B3 is deleting artwork. It does not: `hatching` keeps
+> `thin` 0.993 and its verdict, and a test asserts both.
+
+> **The triage table's miss moved, and the new one is honest.** Preprocessed,
+> the corpus still grades 19/20, but the miss is now `scan-skewed` — *marginal*
+> to a human because it is crooked on the glass, and **nothing here measures
+> rotation**. Before B3 it landed on *marginal* for its grain, which was the
+> right answer for the wrong reason; with the grain gone there is no signal left.
+> A deskew stage is the obvious next thing the corpus is asking for.
+
+<details>
+<summary>Original plan for this step</summary>
 
 The heart of the phase. Each stage independently testable:
 
@@ -998,6 +1104,16 @@ automatically preprocessing that works**, and the triage table is where that
 shows up: if B3 moves `hatching` out of *hopeless*, B3 is deleting artwork, not
 denoising.
 
+</details>
+
+> **One item deferred, deliberately: EXIF rotation.** Stage 1 says "load, honour
+> EXIF rotation, upscale small inputs", and the upscale is built. Orientation is
+> a property of the *file*, not of the pixels, and only Pillow can read it — so
+> it belongs in `raster.load_image` beside the rest of the format handling
+> rather than in a pipeline that takes a decoded raster. The corpus is PNG and
+> carries no orientation, so shipping it here would have meant a stage no test
+> could exercise. It lands with the first real JPEG.
+
 ### B4. Layered tracing · size M
 
 Split the quantised image into one binary mask per colour and trace each
@@ -1012,7 +1128,10 @@ neighbouring colours.
 **Done when:** a three-colour logo produces three layers, each single-coloured,
 with no visible seams.
 
-**Half-built by B0.** `tracer.py`'s mask backends already split the quantisation
+**Half-built by B0, and fed by B3.** The quantisation B4 splits is now the Lab
+one, already despeckled and already merged down to the colours a person can
+tell apart — so "one layer per colour" starts from a palette worth having.
+`tracer.py`'s mask backends already split the quantisation
 into per-colour masks, trace each, and assemble one `<g>` per colour ordered
 largest-area-first, with the fill on the group — so the layered structure exists
 and is tested. What B4 owes is the seam work (growing each mask by a hair) and
@@ -1071,7 +1190,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
-   ✅ CLEARED       │
+   ✅ CLEARED       │      ✅ CLEARED
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
@@ -1083,13 +1202,15 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B0, B1 and B2 are done, and all three point at the same
-next step. B0's `fit` column says what preprocessing is worth in pixels per
-image; B1 pinned `scan-clean` as the row that measures like junk and is not;
-B2 tried denoising well enough to grade on, failed, and named the failure. **B3
-is now the only unblocked step, and it is the phase's real work** — it arrives
-with three separate tests that should start failing when it lands, which is the
-best possible position to start from.
+**Where Phase B stands:** B0, B1, B2 and B3 are done — the phase's real work is
+behind it. A scan now converts: `scan-clean` goes from `fit` 0.253 to 0.032, and
+the whole corpus needs a third of the paths it did. **B4 is next**, and B0 left
+it half-built — the per-colour masks and one `<g>` each already exist and are
+tested, so what B4 owes is the seam work and the ordering rule.
+
+The corpus is also now asking for two things nobody planned: a **deskew** stage
+(the only triage miss left is `scan-skewed`, and nothing measures rotation) and
+**EXIF orientation** (deferred out of B3, see there).
 
 ## Risks, named up front
 

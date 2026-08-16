@@ -356,8 +356,16 @@ def measure(
     entry: CorpusEntry,
     work_side: Optional[int] = None,
     backend: Optional[TracerBackend] = None,
+    preprocess: bool = False,
 ) -> Measurement:
-    """Everything B1 can say about one image, plus what B0's tracer makes of it."""
+    """Everything B1 can say about one image, plus what B0's tracer makes of it.
+
+    With ``preprocess``, the image goes through B3's pipeline first and every
+    number describes the result: the metrics run on the cleaned image, and the
+    tracer traces the Lab quantisation rather than the RGB one. That is a
+    different question from the raw run, not a better answer to the same one, so
+    :func:`incomparable` refuses to diff the two.
+    """
     row = Measurement(
         name=entry.name, category=entry.category, expect=entry.expect, profile=entry.profile
     )
@@ -378,14 +386,30 @@ def measure(
 
     scale = scale_for(profile, max(source.width, source.height), work_side)
     work = downsample(source, scale.work_side)
+    row.k = color_budget(profile)
+
+    reduced: Optional[Quantisation] = None
+    if preprocess:
+        from .preprocess import Recipe
+        from .preprocess import run as preprocess_run
+
+        # Upscaling is deliberately left off here: it invents no detail, but it
+        # would let the thinness test claim an answer at a resolution the source
+        # does not have. It belongs to the conversion path (B6), not to
+        # measuring. See preprocess.upscale.
+        result = preprocess_run(work, Recipe(colors=row.k, radius=scale.radius))
+        work = result.cleaned
+        reduced = result.quantisation
+        row.notes.extend(f"preprocess/{stage.name}: {stage.says}" for stage in result.stages)
+
     row.res = max(work.width, work.height)
     row.mm_px = round(scale.mm_per_pixel, 3)
     row.min_mm = scale.min_mm
     row.colors = unique_colors(work)
-    row.k = color_budget(profile)
     row.flat = flat_ratio(work)
 
-    reduced: Quantisation = quantise(work, row.k)
+    if reduced is None:
+        reduced = quantise(work, row.k)
     row.quant = compare_rasters(work, reduced.raster()).ratio
     row.edges = edge_density(reduced)
     if scale.faithful:
@@ -453,6 +477,10 @@ class BenchRun:
     #: And the version of it, for the same reason one step finer: potrace 1.16
     #: and potrace 1.10 do not have to agree on a curve.
     tracer_version: str = ""
+    #: Whether B3's pipeline ran before measuring. Recorded for the same reason
+    #: as the other two: it changes every number in the table, so a preprocessed
+    #: run and a raw one answer different questions and must not be diffed.
+    preprocess: bool = False
 
     @property
     def measured(self) -> List[Measurement]:
@@ -485,6 +513,7 @@ class BenchRun:
             "work_side": self.work_side,
             "tracer": self.tracer,
             "tracer_version": self.tracer_version,
+            "preprocess": self.preprocess,
             "averages": self.averages(),
             "rows": {row.name: row.to_dict() for row in self.rows},
         }
@@ -517,6 +546,7 @@ def run(
     work_side: Optional[int] = None,
     corpus: str = "",
     backend: Optional[TracerBackend] = None,
+    preprocess: bool = False,
 ) -> BenchRun:
     """Measure every entry. ``backend=None`` means *do not trace*, not *pick one*.
 
@@ -525,11 +555,15 @@ def run(
     from another tool — gives the same numbers on every machine.
     """
     return BenchRun(
-        rows=[measure(entry, work_side=work_side, backend=backend) for entry in entries],
+        rows=[
+            measure(entry, work_side=work_side, backend=backend, preprocess=preprocess)
+            for entry in entries
+        ],
         work_side=work_side,
         corpus=corpus,
         tracer=backend.name if backend else "",
         tracer_version=backend.version() if backend else "",
+        preprocess=preprocess,
     )
 
 
@@ -592,6 +626,13 @@ def incomparable(baseline: Dict[str, Any], current: BenchRun) -> List[str]:
             f"tracer version: baseline on {now} "
             f"{baseline.get('tracer_version') or 'unknown'}, this run on "
             f"{current.tracer_version or 'unknown'}"
+        )
+    was, now = bool(baseline.get("preprocess", False)), current.preprocess
+    if was != now:
+        reasons.append(
+            f"preprocessing: baseline measured the image "
+            f"{'after B3 cleaned it' if was else 'as handed in'}, this run "
+            f"{'after B3 cleaned it' if now else 'as handed in'}"
         )
     return reasons
 
@@ -743,7 +784,8 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
         if bench.tracer
         else "no tracer here"
     )
-    lines.append(f"{summary}  ·  {resolution}  ·  {traced}")
+    prepared = "preprocessed (B3)" if bench.preprocess else "as handed in"
+    lines.append(f"{summary}  ·  {resolution}  ·  {prepared}  ·  {traced}")
     lines.extend(_grading(bench))
     if bench.unmeasured:
         lines.append(
@@ -782,13 +824,14 @@ def compare_tracers(
     work_side: Optional[int] = None,
     corpus: str = "",
     backends: Optional[Sequence[TracerBackend]] = None,
+    preprocess: bool = False,
 ) -> List[BenchRun]:
     """One full sweep per installed tracer — the instrument B0's decision rests on."""
     from .tracer import available_backends
 
     chosen = list(backends if backends is not None else available_backends())
     return [
-        run(entries, work_side=work_side, corpus=corpus, backend=backend)
+        run(entries, work_side=work_side, corpus=corpus, backend=backend, preprocess=preprocess)
         for backend in chosen
     ]
 

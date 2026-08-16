@@ -202,6 +202,17 @@ def build_parser() -> argparse.ArgumentParser:
         "measured at whatever resolution makes its profile's minimum feature "
         "a whole kernel wide",
     )
+    bench.add_argument(
+        "--tracer",
+        metavar="NAME",
+        help="which tracer fills in paths/nodes/fit: potrace, potracer, vtracer, "
+        "or 'none'; by default the best one installed here",
+    )
+    bench.add_argument(
+        "--tracers",
+        action="store_true",
+        help="run the corpus once per installed tracer and compare them (B0)",
+    )
     bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
@@ -670,21 +681,41 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             return 2
         entries = [entry for entry in entries if entry.name in wanted]
 
+    if args.tracers:
+        runs = bench_module.compare_tracers(
+            entries,
+            work_side=args.work_side,
+            corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
+        )
+        print(bench_module.render_tracer_comparison(runs, color=color))
+        return 0
+
+    try:
+        backend = bench_module.resolve_backend(args.tracer)
+    except bench_module.BenchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     result = bench_module.run(
         entries,
         work_side=args.work_side,
         corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
+        backend=backend,
     )
 
     # A subset run must never overwrite a whole-corpus baseline with three rows.
     baseline_path = args.baseline or bench_module.DEFAULT_BASELINE
     changes = None
+    blocked: List[str] = []
     if not args.no_compare and Path(baseline_path).is_file():
         try:
-            changes = bench_module.compare(bench_module.load_baseline(baseline_path), result)
+            baseline = bench_module.load_baseline(baseline_path)
         except bench_module.BenchError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        blocked = bench_module.incomparable(baseline, result)
+        if not blocked:
+            changes = bench_module.compare(baseline, result)
         if args.only:  # only the rows we actually measured can have moved
             changes = [change for change in changes if change.name in {e.name for e in entries}]
 
@@ -695,6 +726,14 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         if changes is not None:
             print()
             print(bench_module.render_changes(changes, color=color))
+        elif blocked:
+            print(
+                "\nnot compared against the baseline — it was taken under different "
+                "conditions, so a diff would measure those rather than the code:"
+            )
+            for reason in blocked:
+                print(f"  · {reason}")
+            print("  re-record with 'svgemb bench --save' to make this run the baseline.")
         elif not args.no_compare:
             print(f"\nno baseline at {baseline_path} — record one with 'svgemb bench --save'")
 

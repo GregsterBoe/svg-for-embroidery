@@ -11,19 +11,22 @@ from svg_embroidery.bench import (
     canvas_and_stroke,
     color_budget,
     compare,
+    incomparable,
     load_baseline,
     load_corpus,
     measure,
     render_changes,
     render_metric_help,
     render_table,
+    resolve_backend,
     run,
     scale_for,
 )
 from svg_embroidery.cli import main
 from svg_embroidery.profiles import load_profile
 from svg_embroidery.raster import encode_png
-from svg_embroidery.visual import Raster
+from svg_embroidery.tracer import available_backends, default_backend
+from svg_embroidery.visual import Raster, default_renderer
 
 BASIC = load_profile("embroidery-basic")
 
@@ -380,3 +383,84 @@ def test_bench_json_carries_the_rows_and_the_changes(tmp_path, capsys):
 def test_a_missing_corpus_is_a_usage_error(tmp_path, capsys):
     assert main(["bench", "--corpus", str(tmp_path / "nowhere")]) == 2
     assert "make_corpus" in capsys.readouterr().err
+
+
+# -- the tracer columns (B0) -------------------------------------------------
+
+def test_measuring_without_a_tracer_leaves_those_cells_empty(tmp_path):
+    directory = tiny_corpus(tmp_path / "c", {"a": image(64, 64, lambda x, y: RED)})
+    result = run(load_corpus(directory))
+    assert result.tracer == ""
+    row = result.rows[0]
+    assert row.paths is None and row.nodes is None and row.fit is None
+    # ...and the row is still a measurement, not a failure.
+    assert row.flat is not None
+    assert "no tracer here" in render_table(result)
+
+
+def test_a_tracer_that_is_not_installed_is_a_usage_error_not_a_crash(tmp_path, capsys):
+    directory = tiny_corpus(tmp_path / "c", {"a": image(32, 32, lambda x, y: RED)})
+    assert main(["bench", "--corpus", str(directory), "--tracer", "nope"]) == 2
+    assert "no such tracer" in capsys.readouterr().err
+
+
+def test_asking_for_no_tracer_is_different_from_asking_for_the_default():
+    assert resolve_backend("none") is None
+    assert resolve_backend(None) is default_backend()
+
+
+def test_a_baseline_taken_at_another_resolution_is_not_diffed(tmp_path):
+    result = small_run(tmp_path, RED)
+    baseline = dict(result.to_dict(), work_side=64)
+    reasons = incomparable(baseline, result)
+    assert reasons and "resolution" in reasons[0]
+
+
+def test_a_baseline_taken_with_another_tracer_is_not_diffed(tmp_path):
+    """Two tracers disagree on every path in the table.
+
+    Diffing across them grades the tracers, not the code — which looks exactly
+    like an answer and is not one.
+    """
+    result = small_run(tmp_path, RED)          # untraced
+    reasons = incomparable(dict(result.to_dict(), tracer="potrace"), result)
+    assert reasons and "tracer" in reasons[0]
+    assert incomparable(result.to_dict(), result) == []
+
+
+def test_a_tracer_version_change_is_reason_enough_to_refuse(tmp_path):
+    result = small_run(tmp_path, RED)
+    same_name = dict(result.to_dict(), tracer=result.tracer, tracer_version="0.0.1")
+    reasons = incomparable(same_name, result)
+    assert reasons and "version" in reasons[0]
+
+
+def test_the_command_says_why_it_did_not_compare(tmp_path, capsys):
+    directory = tiny_corpus(tmp_path / "c", {"a": image(64, 64, lambda x, y: RED)})
+    baseline = tmp_path / "baseline.json"
+    main(["bench", "--corpus", str(directory), "--baseline", str(baseline), "--save"])
+    capsys.readouterr()
+
+    payload = json.loads(baseline.read_text(encoding="utf-8"))
+    payload["work_side"] = 64
+    baseline.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert main(["bench", "--corpus", str(directory), "--baseline", str(baseline)]) == 0
+    out = capsys.readouterr().out
+    assert "not compared" in out and "resolution" in out
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+def test_a_traced_row_fills_in_the_columns_that_describe_the_svg(tmp_path):
+    directory = tiny_corpus(
+        tmp_path / "c",
+        {"a": image(64, 64, lambda x, y: RED if 16 < x < 48 and 16 < y < 48 else BLACK)},
+    )
+    backend = default_backend()
+    result = run(load_corpus(directory), backend=backend)
+    assert result.tracer == backend.name and result.tracer_version
+    row = result.rows[0]
+    assert row.paths and row.paths >= 2   # a square on a background
+    assert row.nodes and row.nodes >= row.paths
+    if default_renderer() is not None:
+        assert row.fit is not None and row.fit < 0.05

@@ -15,13 +15,16 @@ So ``svgemb bench`` does two things:
    metric, which direction is *better*. That is recorded in :data:`METRICS` and
    is the reason the table can grade itself.
 
-**What is measured today, and what is not.** There is no tracer yet (B0 picks
-one, B4 wires it in), so the columns describing an SVG — path count, whether the
-result passes its profile — are empty and print as ``·``. They are declared here
-anyway, with their direction, so that when B4 lands the baseline diff grades
-them from the first run instead of needing the harness changed. The columns that
-*are* filled describe the image and the colour reduction, which is where the
-roadmap says the quality actually comes from.
+**What is measured today, and what is not.** B0 wired a tracer in behind the
+``paths`` and ``fit`` columns, so those fill in whenever this machine has one;
+``passes`` waits for B6 and still prints ``·``. The columns describing the image
+and the colour reduction are the ones the roadmap says quality actually comes
+from, and they are filled everywhere.
+
+**A run is only comparable to a baseline taken the same way.** Both the working
+resolution and the tracer change every number in the table, so a diff across
+either is refused with the reason rather than printed — see
+:func:`incomparable`.
 
 **A measurement you can't take is not a failure.** An image this machine cannot
 decode — a JPEG with no Pillow — is reported as unmeasured with the reason,
@@ -50,7 +53,10 @@ from .raster import (
     thin_ratio,
     unique_colors,
 )
-from .visual import compare_rasters
+from .tracer import Backend as TracerBackend
+from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
+from .tracer import TracerError, default_backend
+from .visual import compare_rasters, render
 
 #: Where the corpus lives when nothing else is said. Kept out of ``tests/`` on
 #: purpose: it is a measuring instrument that happens to be checked in, not a
@@ -165,7 +171,12 @@ METRICS: Sequence[Metric] = (
            "share of pixels on a colour boundary — a stand-in for path count"),
     Metric("thin", "thin", 6, "ratio", "lower",
            "share of the image in features too fine for this profile's needle"),
-    Metric("paths", "paths", 6, "int", "lower", "paths in the traced SVG (B4)"),
+    Metric("paths", "paths", 6, "int", "lower",
+           "subpaths in the traced SVG — shapes the machine has to fill"),
+    Metric("nodes", "nodes", 6, "int", "lower",
+           "drawing commands in the traced SVG — where stitch count comes from"),
+    Metric("fit", "fit", 6, "ratio", "lower",
+           "share of pixels the traced SVG gets wrong against the quantised source"),
     Metric("passes", "passes", 6, "text", "", "does the converted SVG pass its profile (B6)"),
 )
 
@@ -191,7 +202,14 @@ class Measurement:
     edges: Optional[float] = None
     thin: Optional[float] = None
     paths: Optional[int] = None
+    nodes: Optional[int] = None
+    fit: Optional[float] = None
     passes: Optional[str] = None
+    #: Wall-clock seconds the tracer took on this image. Deliberately *not* a
+    #: metric: it is a property of the machine as much as of the code, and
+    #: putting it in the baseline would make every run a regression. It is
+    #: recorded because choosing between tracers needs it.
+    trace_seconds: Optional[float] = None
     #: Non-empty when the row could not be measured here, saying why.
     unmeasured: str = ""
     #: Reasons individual cells are empty, when the row as a whole is fine.
@@ -291,8 +309,43 @@ def color_budget(profile: Profile) -> int:
     return 3
 
 
-def measure(entry: CorpusEntry, work_side: Optional[int] = None) -> Measurement:
-    """Everything B1 can say about one image."""
+def trace_row(
+    row: Measurement, reduced: Quantisation, canvas_mm: float, backend: TracerBackend
+) -> None:
+    """Fill in the columns that describe the traced SVG, or say why they are empty.
+
+    Two separate capabilities are needed here and they fail independently: the
+    tracer produces ``paths``/``nodes``, and only a renderer can say whether the
+    result looks like the source. Missing either costs those cells and nothing
+    else.
+    """
+    try:
+        traced = backend.trace(reduced, canvas_mm=canvas_mm)
+    except TracerError as exc:
+        row.notes.append(f"paths: not traced — {exc}")
+        return
+    row.paths = traced.paths
+    row.nodes = traced.nodes
+    row.trace_seconds = round(traced.seconds, 4)
+    for note in traced.notes:
+        row.notes.append(f"{backend.name}: {note}")
+
+    shot = render(traced.svg, width=reduced.width)
+    if shot is None:
+        row.notes.append(
+            "fit: not measurable — tracing worked, but no renderer is installed "
+            "to compare the result against the source"
+        )
+        return
+    row.fit = compare_rasters(reduced.raster(), shot).ratio
+
+
+def measure(
+    entry: CorpusEntry,
+    work_side: Optional[int] = None,
+    backend: Optional[TracerBackend] = None,
+) -> Measurement:
+    """Everything B1 can say about one image, plus what B0's tracer makes of it."""
     row = Measurement(
         name=entry.name, category=entry.category, expect=entry.expect, profile=entry.profile
     )
@@ -329,6 +382,9 @@ def measure(entry: CorpusEntry, work_side: Optional[int] = None) -> Measurement:
             f"thin: not measurable — at {scale.mm_per_pixel:.2f} mm/px the smallest "
             f"kernel asks {scale.kernel_mm:.1f} mm, not the profile's {scale.min_mm:.1f} mm"
         )
+
+    if backend is not None:
+        trace_row(row, reduced, canvas_and_stroke(profile)[0], backend)
     return row
 
 
@@ -343,6 +399,14 @@ class BenchRun:
     #: a run at another without saying so.
     work_side: Optional[int]
     corpus: str
+    #: Which tracer filled in ``paths``/``nodes``/``fit``, or "" when this
+    #: machine has none. Recorded for the same reason ``work_side`` is: two
+    #: tracers do not produce comparable numbers, so a diff across them is a
+    #: diff of the tracers, not of the code under test.
+    tracer: str = ""
+    #: And the version of it, for the same reason one step finer: potrace 1.16
+    #: and potrace 1.10 do not have to agree on a curve.
+    tracer_version: str = ""
 
     @property
     def measured(self) -> List[Measurement]:
@@ -373,18 +437,53 @@ class BenchRun:
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "corpus": self.corpus,
             "work_side": self.work_side,
+            "tracer": self.tracer,
+            "tracer_version": self.tracer_version,
             "averages": self.averages(),
             "rows": {row.name: row.to_dict() for row in self.rows},
         }
 
 
+#: Passed as ``backend`` to ask for no tracing at all, as opposed to ``None``,
+#: which means "whichever tracer this machine has".
+NO_TRACER = "none"
+
+
+def resolve_backend(name: Optional[str]) -> Optional[TracerBackend]:
+    """Turn a ``--tracer`` argument into a backend, or ``None`` for no tracing."""
+    if name == NO_TRACER:
+        return None
+    if name:
+        from .tracer import backend_named
+
+        try:
+            backend = backend_named(name)
+        except TracerError as exc:  # a typo is a usage error, not a crash
+            raise BenchError(str(exc)) from exc
+        if not backend.available():
+            raise BenchError(f"tracer {name} is not available here — {backend.install}")
+        return backend
+    return default_backend()
+
+
 def run(
-    entries: Sequence[CorpusEntry], work_side: Optional[int] = None, corpus: str = ""
+    entries: Sequence[CorpusEntry],
+    work_side: Optional[int] = None,
+    corpus: str = "",
+    backend: Optional[TracerBackend] = None,
 ) -> BenchRun:
+    """Measure every entry. ``backend=None`` means *do not trace*, not *pick one*.
+
+    Choosing a default is policy and lives in the command (see
+    :func:`resolve_backend`), so that calling this directly — from a test, or
+    from another tool — gives the same numbers on every machine.
+    """
     return BenchRun(
-        rows=[measure(entry, work_side=work_side) for entry in entries],
+        rows=[measure(entry, work_side=work_side, backend=backend) for entry in entries],
         work_side=work_side,
         corpus=corpus,
+        tracer=backend.name if backend else "",
+        tracer_version=backend.version() if backend else "",
     )
 
 
@@ -419,6 +518,36 @@ def load_baseline(path: Path) -> Dict[str, Any]:
             f"{BASELINE_VERSION} — re-record it with 'svgemb bench --save'"
         )
     return data
+
+
+def incomparable(baseline: Dict[str, Any], current: BenchRun) -> List[str]:
+    """Reasons this run must not be diffed against this baseline.
+
+    The project's own rule — *a metric that can't answer the question must not
+    print a number* — applies to the diff as much as to the table. Change the
+    working resolution or the tracer and every cell moves, so a diff across
+    either measures the conditions rather than the code, and is worse than no
+    diff at all because it looks like an answer.
+    """
+    reasons = []
+    was, now = baseline.get("work_side"), current.work_side
+    if was != now:
+        reasons.append(
+            f"resolution: baseline at {was or 'per profile'}, this run at "
+            f"{now or 'per profile'}"
+        )
+    was, now = baseline.get("tracer", ""), current.tracer
+    if was != now:
+        reasons.append(
+            f"tracer: baseline used {was or 'none'}, this run used {now or 'none'}"
+        )
+    elif baseline.get("tracer_version", "") != current.tracer_version:
+        reasons.append(
+            f"tracer version: baseline on {now} "
+            f"{baseline.get('tracer_version') or 'unknown'}, this run on "
+            f"{current.tracer_version or 'unknown'}"
+        )
+    return reasons
 
 
 def _moved(metric: Metric, before: Any, after: Any) -> bool:
@@ -531,7 +660,12 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
         if bench.work_side
         else "resolution per profile (see res)"
     )
-    lines.append(f"{summary}  ·  {resolution}")
+    traced = (
+        f"traced with {bench.tracer} {bench.tracer_version}".rstrip()
+        if bench.tracer
+        else "no tracer here"
+    )
+    lines.append(f"{summary}  ·  {resolution}  ·  {traced}")
     if bench.unmeasured:
         lines.append(
             "ℹ️  A format this machine cannot decode is a row you don't get, not a "
@@ -562,6 +696,69 @@ def render_changes(changes: Sequence[Change], color: bool = True) -> str:
     if color:
         return text
     return text.replace("✅", "[ok]").replace("❌", "[worse]").replace("•", "[note]")
+
+
+def compare_tracers(
+    entries: Sequence[CorpusEntry],
+    work_side: Optional[int] = None,
+    corpus: str = "",
+    backends: Optional[Sequence[TracerBackend]] = None,
+) -> List[BenchRun]:
+    """One full sweep per installed tracer — the instrument B0's decision rests on."""
+    from .tracer import available_backends
+
+    chosen = list(backends if backends is not None else available_backends())
+    return [
+        run(entries, work_side=work_side, corpus=corpus, backend=backend)
+        for backend in chosen
+    ]
+
+
+def _totals(bench: BenchRun, key: str) -> Optional[int]:
+    values = [row.value(key) for row in bench.measured if row.value(key) is not None]
+    return sum(values) if values else None
+
+
+def render_tracer_comparison(runs: Sequence[BenchRun], color: bool = True) -> str:
+    """Every tracer over the same corpus, and what each one costs.
+
+    Deliberately four numbers and not one: a tracer that draws fewer paths has
+    either simplified the artwork or thrown it away, and only ``fit`` tells you
+    which. Reading ``paths`` without ``fit`` is how you end up choosing the
+    tracer that erases the design.
+    """
+    if not runs:
+        return f"no tracer installed here, so there is nothing to compare — {TRACER_INSTALL_HINT}"
+
+    lines = [
+        f"{'tracer':<16}{'images':>7}{'paths':>8}{'nodes':>8}{'fit':>8}{'seconds':>9}",
+        "─" * 56,
+    ]
+    for bench in runs:
+        fits = [row.fit for row in bench.measured if row.fit is not None]
+        mean_fit = f"{sum(fits) / len(fits):.3f}" if fits else "·"
+        spent = sum(
+            row.trace_seconds for row in bench.measured if row.trace_seconds is not None
+        )
+        label = f"{bench.tracer} {bench.tracer_version}".rstrip()
+        lines.append(
+            f"{label:<16}{len(bench.measured):>7}"
+            f"{_totals(bench, 'paths') or 0:>8}{_totals(bench, 'nodes') or 0:>8}"
+            f"{mean_fit:>8}{spent:>9.2f}"
+        )
+
+    names = [bench.tracer for bench in runs]
+    width = max([len(row.name) for row in runs[0].rows] + [len("fit by image")])
+    lines += ["", f"{'fit by image':<{width}}" + "".join(f"{n:>10}" for n in names)]
+    for index, row in enumerate(runs[0].rows):
+        cells = []
+        for bench in runs:
+            value = bench.rows[index].fit
+            cells.append(f"{value:>10.3f}" if value is not None else f"{'·':>10}")
+        lines.append(f"{row.name:<{width}}" + "".join(cells))
+
+    text = "\n".join(lines)
+    return text if color else text
 
 
 def render_metric_help() -> str:

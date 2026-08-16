@@ -18,6 +18,10 @@ dev = ["pytest>=7.0"]
 render = ["cairosvg>=2.7"]          # fallback renderer; a binary is preferred
 geometry = ["shapely>=2.0"]         # path offsetting, booleans (roadmap A5)
 convert = ["Pillow>=10.0", "numpy>=1.24"]  # raster pipeline (roadmap B3+)
+# Tracers, for machines that cannot install the potrace binary. potracer is the
+# same algorithm in pure Python (needs numpy, ~11x slower); vtracer traces
+# colour directly. See docs/spikes/B0-tracers.md for why the binary is default.
+trace = ["potracer>=0.0.4", "vtracer>=0.6"]
 
 [project.scripts]
 svgemb = "svg_embroidery.cli:main"

@@ -171,7 +171,14 @@ def _installed_image_readers():
     """
     from .raster import pillow_available
 
-    return (["Pillow"] if pillow_available() else []) + ["potrace"]
+    return ["Pillow"] if pillow_available() else []
+
+
+def _installed_tracers():
+    """And for tracing, so ``SVGEMB_NO_TRACER=1`` shows up too."""
+    from .tracer import available_backends
+
+    return [backend.name for backend in available_backends()]
 
 
 CAPABILITIES: Sequence[Capability] = (
@@ -224,26 +231,45 @@ CAPABILITIES: Sequence[Capability] = (
     ),
     Capability(
         key="raster",
-        title="Raster conversion",
-        # PNG is measurable with nothing installed — the decoder the visual
-        # harness already needs doubles as the corpus reader — so 'svgemb bench'
-        # works on a bare install. Pillow adds every other format, potrace does
-        # the tracing.
-        enables="turning PNG/JPG images into embroidery-ready SVG (PNG measuring "
-        "needs nothing)",
-        requirements=(
-            Requirement("Pillow", "module", "PIL", distribution="Pillow"),
-            Requirement("potrace", "command", "potrace"),
-        ),
-        mode="all",
+        title="Reading images",
+        # PNG needs nothing installed — the decoder the visual harness already
+        # requires doubles as the corpus reader — so 'svgemb bench' works on a
+        # bare install. Pillow is what adds every other format.
+        enables="measuring JPEG/GIF/BMP/WebP images (PNG needs nothing)",
+        requirements=(Requirement("Pillow", "module", "PIL", distribution="Pillow"),),
+        mode="any",
         probe=_installed_image_readers,
         hints={
-            "termux": "pkg install python-pillow potrace",
-            "linux": 'apt install potrace && pip install "svg-for-embroidery[convert]"',
-            "macos": 'brew install potrace && pip install "svg-for-embroidery[convert]"',
-            "windows": 'pip install "svg-for-embroidery[convert]" and install potrace',
+            "termux": "pkg install python-pillow",
+            "linux": 'pip install "svg-for-embroidery[convert]"',
+            "macos": 'pip install "svg-for-embroidery[convert]"',
+            "windows": 'pip install "svg-for-embroidery[convert]"',
         },
-        step="B0-B4",
+        step="B1",
+    ),
+    Capability(
+        key="tracing",
+        title="Tracing",
+        # B0 compared all three on the corpus: potrace and potracer are the same
+        # algorithm and score identically, with the binary 11x faster; vtracer is
+        # faster still and much simpler in output, but fits the source about half
+        # as well on the line art this project exists for. Hence the order.
+        enables="turning a reduced image into paths — the vector half of "
+        "image → embroidery",
+        requirements=(
+            Requirement("potrace", "command", "potrace"),
+            Requirement("potracer", "module", "potrace", distribution="potracer"),
+            Requirement("vtracer", "module", "vtracer"),
+        ),
+        mode="any",
+        probe=_installed_tracers,
+        hints={
+            "termux": "pkg install potrace   (or: pip install potracer, no binary needed)",
+            "linux": 'apt install potrace   (or: pip install "svg-for-embroidery[trace]")',
+            "macos": 'brew install potrace   (or: pip install "svg-for-embroidery[trace]")',
+            "windows": 'pip install "svg-for-embroidery[trace]"',
+        },
+        step="B0",
     ),
 )
 

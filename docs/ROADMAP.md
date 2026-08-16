@@ -44,7 +44,8 @@ machine):
 | --- | --- | --- | --- |
 | **Core** — check, write, round-trip, fix, web UI | stdlib + PyYAML | Yes, always | n/a |
 | **Rendering** (A1) — visual regression, previews | any of `rsvg-convert`, `resvg`, Inkscape, `cairosvg` | Yes — `pkg install librsvg` | comparisons are skipped, nothing fails |
-| **Raster** (B3+) — image → SVG | Pillow + potrace | Yes — `pkg install python-pillow potrace` | conversion unavailable |
+| **Reading images** (B1) — measuring a source | nothing for PNG; Pillow for JPEG and the rest | Yes — `pkg install python-pillow` | that format is a row you don't get, with the reason |
+| **Tracing** (B0) — image → paths | any of `potrace`, `potracer`, `vtracer` | Yes — `pkg install potrace`, or pip-install potracer with no binary at all | `paths`/`fit` are empty, the rest of the table still fills |
 | **Path geometry** (A5) — offsetting, booleans | shapely (A5 picked one stack, not two) | **Maybe** — needs GEOS and a compiler; the one fragile tier | stroke→outline and min-feature-size unavailable |
 
 So only *one* tier is genuinely at risk on mobile, and only for two features.
@@ -735,24 +736,57 @@ below happens *before* anything is vectorised — and, since that claim is only
 worth acting on if it can be checked, the measuring instrument (B1) is built
 before the thing it measures.
 
-### B0. Buy, don't build · size S
+### B0. Buy, don't build · ✅ CLEARED
 
-Do not write a tracer — that's a research project. Evaluate existing ones on our
-own corpus:
+Do not write a tracer — that's a research project. All three candidates were
+wrapped in one interface and run over the whole corpus; the write-up is
+[docs/spikes/B0-tracers.md](spikes/B0-tracers.md).
 
-| Candidate | Notes |
-| --- | --- |
-| **potrace** | Best-in-class for single-colour bitmaps. Binary, `pkg install potrace` in Termux. Traces one mask at a time — which is exactly the shape of our problem. |
-| **VTracer** | Colour tracing out of the box, fast. Rust; check for an Android wheel before committing. |
-| **autotrace** | Older, more artefacts. Fallback. |
+**Gate met.** `svgemb bench --tracers`:
 
-**Done when:** a written spike comparing output on the corpus, with a decision
-and its reasoning recorded. Recommendation to beat: potrace, per colour layer.
+```
+tracer           images   paths   nodes     fit  seconds
+────────────────────────────────────────────────────────
+potrace 1.16         20    6649   72915   0.108     0.47
+potracer 0.0.4       20    6791   73883   0.108     5.19
+vtracer 0.6.15       20    1472   24337   0.201     0.46
+```
 
-**Ready to run:** B1 is cleared, so the corpus and the metrics to judge the
-candidates on both exist. Wire each candidate behind the `paths` column and let
-`svgemb bench` do the comparing — the `edges` column is already a prediction of
-path count, so the first real trace also tests whether that stand-in was honest.
+**Decision: potrace, one mask per colour** — the recommendation to beat, kept.
+potracer is the same algorithm in pure Python and scores identically (within
+0.003 per image), so the choice between them is 11× speed and numpy-vs-nothing,
+not quality; it stays as the fallback for machines that cannot install a binary.
+autotrace was never evaluated: it is not packaged on this distribution at all,
+and a tracer nobody ships is not a fallback.
+
+`fit` — how much of the image the traced SVG gets wrong when rendered back — is
+the column that decides, and the reason the table has four numbers rather than
+one. **A tracer that draws fewer paths has either simplified the artwork or
+thrown it away, and only `fit` says which:** read `paths` alone and vtracer wins
+four to one.
+
+**Two findings worth carrying forward.**
+
+*vtracer is the best tracer here on scans and the worst on line art*, by a lot
+in both directions — 0.030 vs potrace's 0.250 on `scan-clean`, 0.224 vs 0.036 on
+`line-art-thin`. It is not a better tracer; it is a tracer with photograph-tuned
+preprocessing bolted on. That is the strongest evidence this project has for its
+own thesis that **quality comes from preprocessing, not from the tracer**, and it
+sizes B3's prize: the gap between 0.250 and 0.030 on a clean scan, without
+vtracer's habit of deleting thin strokes.
+
+*B1's `edges` stand-in was honest.* It correlates 0.936 with path count and
+**0.991 with node count** on the first real trace — better with nodes, which
+makes sense, a boundary pixel being closer to a vertex than to a shape. It stays
+in the table: it costs nothing and needs no tracer, so a machine with neither can
+still predict what conversion will cost.
+
+**The bug this spike nearly shipped**, because it is the kind that looks like a
+result: potrace's writer puts every outline of a mask into one `<path>` while
+potracer returns loose curves, and emitting one element each turned every hole
+in the artwork into a solid blob — a 3.6× worse score attributed to the wrong
+cause. `paths` is now counted as *subpaths of the finished document*, whoever
+wrote it, and one layer is always one `<path>`.
 
 ### B1. Corpus and metrics — **do this first** · ✅ CLEARED
 
@@ -788,10 +822,21 @@ judgement on real scans. Real images can be dropped in alongside.
 | `quant` | share of pixels changed by reducing to the profile's `k` | lower |
 | `edges` | share of pixels on a colour boundary — a stand-in for path count | lower |
 | `thin` | share of the image finer than this profile's needle | lower |
-| `paths` / `passes` | the traced SVG (B4/B6) — declared, still empty | lower / — |
+| `paths` | subpaths in the traced SVG — shapes the machine has to fill (B0) | lower |
+| `nodes` | drawing commands in the traced SVG — where stitch count comes from (B0) | lower |
+| `fit` | share of pixels the traced SVG gets wrong against its source (B0) | lower |
+| `passes` | does the converted SVG pass its profile (B6) — declared, still empty | — |
 
-`paths` and `passes` are declared now precisely so the baseline grades them from
-the first run that fills them in, rather than needing the harness changed later.
+Declaring a column before it can be filled is deliberate: the baseline grades it
+from the first run that fills it in, rather than needing the harness changed
+later. B0 filled three of the four that way.
+
+**A run is only comparable to a baseline taken the same way.** The working
+resolution and the tracer both change every number in the table, so `svgemb
+bench` refuses the diff across either — with the reason, and with the tracer's
+*version*, since potrace 1.16 and potrace 1.10 need not agree on a curve. Same
+rule as the empty cell: a comparison that can't answer the question must not
+print an answer.
 
 **Two findings worth carrying forward.**
 
@@ -863,9 +908,15 @@ them: `quantise()` (median cut + Lloyd, keeping dominant colours verbatim) and
 what shows whether Lab was worth it.
 
 **Done when:** each stage has a before/after test on a fixture, and B1's metrics
-improve measurably versus tracing the raw image. The specific number to move:
+improve measurably versus tracing the raw image. The specific numbers to move:
 `scan-clean` currently measures `flat` 0.001 and `thin` 0.84 — denoising should
-make a scanned line drawing measure like the flat artwork it is.
+make a scanned line drawing measure like the flat artwork it is — and B0 put a
+figure on the tracing half of the same gap. potrace scores `fit` 0.250 on that
+image and spends 919 paths doing it; vtracer, whose photo-tuned preprocessing
+smooths the grain first, gets 0.030. **B3 succeeds when potrace reaches
+vtracer's number on scans without vtracer's habit of deleting thin strokes**
+(`line-art-thin`, where the same preprocessing costs it 0.224 against potrace's
+0.036).
 
 ### B4. Layered tracing · size M
 
@@ -880,6 +931,15 @@ neighbouring colours.
 
 **Done when:** a three-colour logo produces three layers, each single-coloured,
 with no visible seams.
+
+**Half-built by B0.** `tracer.py`'s mask backends already split the quantisation
+into per-colour masks, trace each, and assemble one `<g>` per colour ordered
+largest-area-first, with the fill on the group — so the layered structure exists
+and is tested. What B4 owes is the seam work (growing each mask by a hair) and
+the ordering rule stated above, which is *darkest-last* where B0 used
+*largest-first*; those disagree on a dark background and the profile should
+settle it. Note also that vtracer, being a colour tracer, produces none of this:
+its flat output is reported as a note on the run rather than quietly restructured.
 
 ### B5. Vector cleanup · size M
 
@@ -905,6 +965,13 @@ what it changed and why.
 **Done when:** ≥80% of the corpus's "good" and "marginal" images convert to a
 passing SVG unattended, with the metrics to prove it.
 
+The `passes` column is left empty until then on purpose — the interesting part
+is the retry, not the single check. Though the single check is worth knowing
+about: B0's traced `logo-two-colour`, with no cleanup at all, already returns
+`✅ PASS: 0 error(s), 0 warning(s), 13 check(s) passed` against
+`embroidery-basic`. One image is not a result, but B5 and B6 evidently start
+closer to passing than this plan assumed.
+
 ### B7. In the UI · size M
 
 Upload an image on the phone → side-by-side preview → sliders for colours and
@@ -926,6 +993,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
    ✅ CLEARED       │
 B0 tracer spike ────┤
+   ✅ CLEARED       │
 B2 triage ──────────┘
 ```
 
@@ -934,9 +1002,11 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B1 is done. B0 and B2 are both unblocked and can run
-in either order; B2's triage has its grading data ready in the corpus manifest's
-`expect` column.
+**Where Phase B stands:** B1 and B0 are done, and between them they left B3 a
+target rather than an intention — the `fit` column now says what preprocessing
+is worth in pixels, per image. **B2 is the only unblocked step**; its triage has
+its grading data ready in the corpus manifest's `expect` column and every metric
+it needs already computed. B3 is next after that and is the phase's real work.
 
 ## Risks, named up front
 

@@ -444,9 +444,41 @@ pixel of the logo counts as changed. A 2% rim became a 20% loss. Where one
 colour dominates its cluster it is now kept verbatim; only where none does —
 a photograph — is the mean right.
 
-The columns for path count and "does it pass" are declared but empty: there is
-no tracer yet (B0 picks one, B4 wires it in). They are declared now so the
-baseline can grade them from the first run that fills them in.
+**B0 — buy a tracer, don't build one.** Writing one is a research project; three
+already exist, so all three were wrapped in one interface and run over the same
+corpus. The full write-up is [`docs/spikes/B0-tracers.md`](docs/spikes/B0-tracers.md).
+
+```bash
+svgemb bench --tracers
+```
+
+```
+tracer           images   paths   nodes     fit  seconds
+────────────────────────────────────────────────────────
+potrace 1.16         20    6649   72915   0.108     0.47
+potracer 0.0.4       20    6791   73883   0.108     5.19
+vtracer 0.6.15       20    1472   24337   0.201     0.46
+```
+
+`fit` is the share of pixels the traced SVG gets wrong when rendered back and
+compared to what it traced, and it is the column that decides. **A tracer that
+draws fewer paths has either simplified the artwork or thrown it away, and only
+`fit` says which** — read `paths` alone and vtracer wins four to one.
+
+The result: **potrace, one mask per colour.** potracer is the same algorithm in
+pure Python and scores identically, so the choice between them is 11× speed and
+numpy-versus-nothing, not quality; it stays as the fallback for machines that
+cannot install a binary. Each traced mask becomes its own `<g>`, largest area
+first — so the layered structure `structure.color_layers` wants comes out of the
+method rather than out of a repair.
+
+The interesting result was vtracer's. It is the **best** tracer here on scans
+(0.030 against potrace's 0.250) and the **worst** on line art (0.224 against
+0.036) — because it is not a better tracer, it is a tracer with photograph-tuned
+preprocessing bolted on. That is the clearest evidence yet for this phase's
+premise, and it puts a number on what B3's preprocessing is worth.
+
+The last empty column, "does it pass", waits for B6.
 
 ### Optional capabilities
 
@@ -460,12 +492,20 @@ and what to install:
 | Core | check, fix, write, round-trip, web UI | nothing — always available |
 | Rendering | visual regression, before/after previews | `pkg install librsvg` (Termux), `apt install librsvg2-bin`, or `pip install cairosvg` |
 | Path geometry | stroke → outline, minimum feature size | `pip install "svg-for-embroidery[geometry]"` |
-| Raster | image → SVG conversion | `pip install "svg-for-embroidery[convert]"` + potrace |
+| Reading images | measuring JPEG/GIF/BMP/WebP sources | `pip install "svg-for-embroidery[convert]"` |
+| Tracing | turning a reduced image into paths | `pkg install potrace` / `apt install potrace`, or `pip install "svg-for-embroidery[trace]"` |
 
 Measuring a **PNG** needs nothing at all — the pure-Python decoder the visual
 harness already carries doubles as the corpus reader, so `svgemb bench` works on
 a bare install. Pillow adds every other image format; without it a JPEG is a row
 you don't get, with the reason printed, and the sweep continues.
+
+Tracing degrades the same way: with no tracer the `paths`, `nodes` and `fit`
+columns are empty and every other column still fills. And because the tracer
+changes every one of those numbers, a run traced with a different tracer — or a
+different *version* of the same one — is not diffed against the baseline at all.
+It says which conditions differ and offers to re-record, rather than printing a
+comparison that grades the tracer and looks like it grades the code.
 
 There is deliberately **no separate mobile edition** — see the decision in
 [`docs/ROADMAP.md`](docs/ROADMAP.md). When a phone can't run a heavy step, run
@@ -485,9 +525,10 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-make test         # 403 tests
+make test         # 429 tests
 make degraded     # the same suite with every optional extra switched off
 make bench        # measure the image corpus against the baseline
+make tracers      # compare every installed tracer on the corpus (roadmap B0)
 ```
 
 Layout:
@@ -507,6 +548,7 @@ src/svg_embroidery/
   visual.py        render + compare images; pure-Python PNG (roadmap A1)
   geometry.py      flattening (pure Python) + offsetting/booleans (roadmap A5)
   raster.py        reading images, quantising, measuring them (roadmap B1)
+  tracer.py        potrace / potracer / vtracer behind one API (roadmap B0)
   bench.py         the corpus sweep and the baseline diff (roadmap B1)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
@@ -517,4 +559,7 @@ bench/
   make_corpus.py   generates the 20-image corpus, deterministically
   corpus/          the images and their manifest
   baseline.json    the numbers to beat
+docs/
+  ROADMAP.md       the plan, and what each step actually cost
+  spikes/          write-ups for decisions that needed evidence first
 ```

@@ -283,6 +283,100 @@ class MinFeatureSizeRule(Rule):
 
 
 @register
+class MinShapeAreaRule(Rule):
+    """B5: shapes too small to hold a single stitch.
+
+    The other half of :class:`MinFeatureSizeRule`, and it exists because that
+    rule cannot see this defect. Thinness is measured over a whole element —
+    one traced colour layer is one ``<path>`` — and forgiven up to a
+    ``tolerance`` of its area, so fifty specks of a stitch each disappear into
+    the rounding of a shape that is otherwise perfectly solid. **A tolerance is
+    the right idea about a fraction of one shape and the wrong idea about a
+    whole one:** every speck here is a thread trim, a knot and a jump stitch,
+    whatever share of the design it represents.
+
+    Two ways a shape gets too small, both reported, because a machine treats
+    them the same way and a person does not:
+
+    *An island* is a fleck of colour on its own — the quantiser rounding a few
+    pixels the wrong way, or a scan's grain that survived denoising.
+    *A hole* is a gap cut in a bigger shape. A needle cannot leave a hole
+    smaller than the stitch it makes either, so it fills in — and until it
+    does, the file says there is bare fabric there.
+
+    Unlike ``geometry.min_feature_size`` this needs **no geometry backend**:
+    the area of a flattened contour is the shoelace formula. So the check that
+    catches what a tracer leaves behind is one that runs on a phone, which is
+    why it can sit in a profile whose verdict must not vary by machine.
+    """
+
+    id = "geometry.min_area"
+    summary = "Every shape must be big enough to hold a stitch"
+    #: The square of the default minimum feature width: a stitch 1.5 mm wide
+    #: needs at least that much in both directions to be worth making.
+    params = {"min_mm2": 2.25}
+
+    def validate(self) -> None:
+        if float(self.config["min_mm2"]) <= 0:
+            raise RuleConfigError(f"rule '{self.id}': min_mm2 must be positive")
+
+    def check(self, doc: SvgDocument) -> Iterable[Finding]:
+        from ..geometry import contour_area, node_contours_mm
+
+        limit = float(self.config["min_mm2"])
+        scale = doc.unit_scale
+        findings: List[Finding] = []
+        shapes = 0
+
+        for node in doc.drawables:
+            if node.paint("fill") is None and node.paint_reference("fill") is None:
+                continue  # nothing is painted inside the outline
+            contours = node_contours_mm(node, scale)
+            if not contours:
+                continue
+            shapes += len(contours)
+
+            areas = [contour_area(contour) for contour in contours]
+            islands = [area for area in areas if 0 < area < limit]
+            holes = [-area for area in areas if -limit < area < 0]
+            if not islands and not holes:
+                continue
+
+            parts = []
+            if islands:
+                parts.append(f"{len(islands)} shape(s) as small as {min(islands):.2f} mm²")
+            if holes:
+                parts.append(f"{len(holes)} hole(s) as small as {min(holes):.2f} mm²")
+            findings.append(
+                self.fail(
+                    f"{node.label} contains {' and '.join(parts)}, under the "
+                    f"{limit:g} mm² a single stitch covers.",
+                    hint="A speck that small stitches as a knot and a thread trim; "
+                    "drop it, or draw it big enough to sew.",
+                    location=node.location,
+                    min_mm2=limit,
+                    islands=len(islands),
+                    holes=len(holes),
+                )
+            )
+
+        if findings:
+            if doc.width_mm is None:
+                findings.append(
+                    self.warn(
+                        "Physical document size is unknown, so shape areas were measured "
+                        "with the CSS default of 96 px per inch.",
+                    )
+                )
+            return findings
+        if shapes == 0:
+            return [self.ok("No filled shapes — nothing to measure.")]
+        return [
+            self.ok(f"All {shapes} shape(s) are at least {limit:g} mm².", measured=True)
+        ]
+
+
+@register
 class ViewBoxRule(Rule):
     id = "geometry.require_viewbox"
     summary = "The <svg> element must carry a viewBox"

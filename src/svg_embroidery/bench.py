@@ -56,7 +56,7 @@ from .raster import (
 from .tracer import Backend as TracerBackend
 from .tracer import DEFAULT_OVERLAP
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
-from .tracer import TracerError, default_backend
+from .tracer import TracerError, default_backend, measure_svg
 from .triage import Band, assess
 from .visual import compare_rasters, render, show_through
 
@@ -73,9 +73,11 @@ RATIO_EPSILON = 0.0005
 #: Bumped when a baseline recorded by an older build would be *silently*
 #: misread — a new column it cannot supply, or a new condition it never
 #: recorded. 2: B4's ``gaps`` column and the seam overlap the run was taken at.
-#: An old baseline is refused with the command to re-record it, rather than
-#: diffed against and reported as twenty regressions.
-BASELINE_VERSION = 2
+#: 3: B5's ``passes`` column, which was declared empty from the start, and the
+#: cleanup the run was taken with. An old baseline is refused with the command
+#: to re-record it, rather than diffed against and reported as twenty
+#: regressions.
+BASELINE_VERSION = 3
 
 
 class BenchError(Exception):
@@ -191,7 +193,9 @@ METRICS: Sequence[Metric] = (
     Metric("gaps", "gaps", 6, "ratio", "lower",
            "share of the traced SVG left unpainted — the seams between colour "
            "layers, which show as hairlines of bare fabric (B4)"),
-    Metric("passes", "passes", 6, "text", "", "does the converted SVG pass its profile (B6)"),
+    Metric("passes", "passes", 6, "text", "",
+           "does the traced SVG pass its profile — 'yes', or how many errors are "
+           "left (B5; B6 adds the retry that argues with the answer)"),
 )
 
 METRIC_BY_KEY = {metric.key: metric for metric in METRICS}
@@ -337,6 +341,8 @@ def trace_row(
     canvas_mm: float,
     backend: TracerBackend,
     overlap: int = DEFAULT_OVERLAP,
+    profile: Optional[Profile] = None,
+    cleanup: bool = False,
 ) -> None:
     """Fill in the columns that describe the traced SVG, or say why they are empty.
 
@@ -344,19 +350,42 @@ def trace_row(
     tracer produces ``paths``/``nodes``, and only a renderer can say whether the
     result looks like the source. Missing either costs those cells and nothing
     else.
+
+    With ``cleanup``, B5 runs over the traced document first and every column
+    describes the cleaned result — which is the point of the flag: ``paths``
+    and ``nodes`` are what the machine is asked to sew, and cleanup is where
+    the shapes it cannot sew come out.
     """
     try:
         traced = backend.trace(reduced, canvas_mm=canvas_mm, overlap=overlap)
     except TracerError as exc:
         row.notes.append(f"paths: not traced — {exc}")
         return
-    row.paths = traced.paths
-    row.nodes = traced.nodes
+    svg = traced.svg
     row.trace_seconds = round(traced.seconds, 4)
     for note in traced.notes:
         row.notes.append(f"{backend.name}: {note}")
 
-    shot = render(traced.svg, width=reduced.width)
+    if profile is not None:
+        from . import cleanup as b5
+
+        if cleanup:
+            cleaned = b5.clean(svg, profile)
+            svg = cleaned.svg
+            row.notes.extend(cleaned.notes())
+            verdict = cleaned.after
+        else:
+            verdict = b5.check(svg, profile)
+        # The B5 gate, per image: does what came out pass the profile it was
+        # aimed at? Filled whether or not cleanup ran, because the interesting
+        # number is the difference between the two.
+        row.passes = "yes" if not verdict.errors else f"{len(verdict.errors)} err"
+
+    # Counted from the document that will actually be stitched, so the columns
+    # and the verdict describe the same file.
+    row.paths, row.nodes = measure_svg(svg)
+
+    shot = render(svg, width=reduced.width)
     if shot is None:
         row.notes.append(
             "fit: not measurable — tracing worked, but no renderer is installed "
@@ -376,6 +405,7 @@ def measure(
     backend: Optional[TracerBackend] = None,
     preprocess: bool = False,
     overlap: int = DEFAULT_OVERLAP,
+    cleanup: bool = False,
 ) -> Measurement:
     """Everything B1 can say about one image, plus what B0's tracer makes of it.
 
@@ -440,7 +470,15 @@ def measure(
         )
 
     if backend is not None:
-        trace_row(row, reduced, canvas_and_stroke(profile)[0], backend, overlap=overlap)
+        trace_row(
+            row,
+            reduced,
+            canvas_and_stroke(profile)[0],
+            backend,
+            overlap=overlap,
+            profile=profile,
+            cleanup=cleanup,
+        )
 
     # B2 grades the row it is handed rather than measuring again, so ``svgemb
     # assess`` and ``svgemb bench`` cannot disagree about an image. Last, so the
@@ -504,6 +542,10 @@ class BenchRun:
     #: more condition that moves ``paths``, ``nodes``, ``fit`` and ``gaps``
     #: together, so it is recorded and diffed like the rest of them.
     overlap: int = DEFAULT_OVERLAP
+    #: Whether B5 cleaned each traced document before it was measured. Same
+    #: reason again: it is meant to move ``paths`` and ``nodes``, so a run with
+    #: it and a run without it are answers to different questions.
+    cleanup: bool = False
 
     @property
     def measured(self) -> List[Measurement]:
@@ -538,6 +580,7 @@ class BenchRun:
             "tracer_version": self.tracer_version,
             "preprocess": self.preprocess,
             "overlap": self.overlap,
+            "cleanup": self.cleanup,
             "averages": self.averages(),
             "rows": {row.name: row.to_dict() for row in self.rows},
         }
@@ -572,6 +615,7 @@ def run(
     backend: Optional[TracerBackend] = None,
     preprocess: bool = False,
     overlap: int = DEFAULT_OVERLAP,
+    cleanup: bool = False,
 ) -> BenchRun:
     """Measure every entry. ``backend=None`` means *do not trace*, not *pick one*.
 
@@ -587,6 +631,7 @@ def run(
                 backend=backend,
                 preprocess=preprocess,
                 overlap=overlap,
+                cleanup=cleanup,
             )
             for entry in entries
         ],
@@ -596,6 +641,7 @@ def run(
         tracer_version=backend.version() if backend else "",
         preprocess=preprocess,
         overlap=overlap,
+        cleanup=cleanup,
     )
 
 
@@ -667,13 +713,21 @@ def incomparable(baseline: Dict[str, Any], current: BenchRun) -> List[str]:
             f"{'after B3 cleaned it' if now else 'as handed in'}"
         )
     # Only worth saying when something was traced: with no tracer there are no
-    # layers to overlap, so the setting cannot have moved a number.
+    # layers to overlap and nothing to clean, so neither setting can have moved
+    # a number.
     if current.tracer:
         was, now = baseline.get("overlap", DEFAULT_OVERLAP), current.overlap
         if was != now:
             reasons.append(
                 f"seam overlap: baseline grew each layer {was}px under the next, "
                 f"this run {now}px"
+            )
+        was, now = bool(baseline.get("cleanup", False)), current.cleanup
+        if was != now:
+            reasons.append(
+                f"cleanup: baseline measured the trace "
+                f"{'after B5 cleaned it' if was else 'as the tracer left it'}, this run "
+                f"{'after B5 cleaned it' if now else 'as the tracer left it'}"
             )
     return reasons
 
@@ -823,6 +877,7 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
     traced = (
         f"traced with {bench.tracer} {bench.tracer_version}".rstrip()
         + f", layers grown {bench.overlap}px"
+        + (", cleaned up (B5)" if bench.cleanup else ", as the tracer left it")
         if bench.tracer
         else "no tracer here"
     )
@@ -868,6 +923,7 @@ def compare_tracers(
     backends: Optional[Sequence[TracerBackend]] = None,
     preprocess: bool = False,
     overlap: int = DEFAULT_OVERLAP,
+    cleanup: bool = False,
 ) -> List[BenchRun]:
     """One full sweep per installed tracer — the instrument B0's decision rests on."""
     from .tracer import available_backends
@@ -881,6 +937,7 @@ def compare_tracers(
             backend=backend,
             preprocess=preprocess,
             overlap=overlap,
+            cleanup=cleanup,
         )
         for backend in chosen
     ]

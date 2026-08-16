@@ -26,6 +26,14 @@ rules:
     params:
       min_mm: 1.5
 
+  # An error here, where basic only warns: this shop stitches small and cheap,
+  # so a speck is a trim it is paying for. 2.25 mm² is the square of the
+  # minimum feature width above — the smallest patch a 1.5 mm stitch can fill
+  # in both directions.
+  - id: geometry.min_area
+    params:
+      min_mm2: 2.25
+
   - id: path.max_count
     params:
       max_paths: 60

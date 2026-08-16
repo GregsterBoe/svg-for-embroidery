@@ -229,6 +229,14 @@ def build_parser() -> argparse.ArgumentParser:
         "it, so the seams between layers cannot show as bare fabric (B4); "
         "0 traces butt joints, which is what the 'gaps' column measures",
     )
+    bench.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="run B5's cleanup over each traced document before measuring it: "
+        "the profile's own repairs, which is where shapes too small to sew "
+        "come out; the 'passes' column says whether the result satisfies the "
+        "profile either way",
+    )
     bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
@@ -752,6 +760,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
             preprocess=args.preprocess,
             overlap=overlap,
+            cleanup=args.cleanup,
         )
         print(bench_module.render_tracer_comparison(runs, color=color))
         return 0
@@ -769,6 +778,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         backend=backend,
         preprocess=args.preprocess,
         overlap=overlap,
+        cleanup=args.cleanup,
     )
 
     # A subset run must never overwrite a whole-corpus baseline with three rows.

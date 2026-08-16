@@ -49,6 +49,7 @@ from ..geometry import (
     measure_thinness,
     node_contours,
     node_contours_mm,
+    simplify_contours,
     stroke_outline,
     trim_thin_detail,
 )
@@ -356,7 +357,17 @@ class RemoveThinFeatures(Fixer):
                     continue
                 if thinness.excess_ratio <= tolerance:
                     continue
-                survivors = trim_thin_detail(contours, minimum, backend=backend)
+                # Simplify what comes back (B5). A boolean result is a polygon
+                # at whatever density its input had, and its input was a curve
+                # flattened to a fiftieth of a millimetre — so every boundary
+                # the repair *did not* touch returns carrying a point every
+                # fraction of a stitch. Thinning them at the tolerance the
+                # shape was measured at adds no error the measurement did not
+                # already have, and each point saved is a stitch.
+                survivors = simplify_contours(
+                    trim_thin_detail(contours, minimum, backend=backend) or [],
+                    DEFAULT_TOLERANCE_MM,
+                )
             except GeometryError as exc:
                 declined.append(f"{node.label}: {exc}")
                 continue

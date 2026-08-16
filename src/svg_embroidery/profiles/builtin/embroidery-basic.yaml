@@ -49,5 +49,16 @@ rules:
     params:
       min_mm: 1.5
 
+  # A shape smaller than the stitch that would fill it is a knot, a trim and a
+  # jump for nothing. A warning here rather than an error: one stray fleck does
+  # not make a file unusable, and the shop that cares about it is the strict
+  # one. Unlike geometry.min_feature_size this needs nothing installed, so it
+  # can sit in the common-denominator profile without its verdict depending on
+  # what a machine has.
+  - id: geometry.min_area
+    params:
+      min_mm2: 2.25
+    severity: warning
+
   - id: fill.required
     severity: warning

@@ -115,15 +115,18 @@ def test_the_destructive_tier_is_exactly_the_repairs_that_lose_artwork():
 
     A5 opened the tier with "cut detail too fine to stitch". A7 added two more,
     both of which ask before running: deleting a forbidden element that is on
-    the canvas, and closing a gap wide enough that the segment is invented.
+    the canvas, and closing a gap wide enough that the segment is invented. B5
+    added the two that delete a whole shape rather than part of one.
     """
     destructive = {
         fixer.rule_id for fixer in available_fixers() if fixer.risk is Risk.DESTRUCTIVE
     }
     assert destructive == {
         "element.forbidden",
+        "geometry.min_area",
         "geometry.min_feature_size",
         "path.closed",
+        "path.max_count",
     }
 
 

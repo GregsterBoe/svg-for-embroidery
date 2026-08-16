@@ -32,7 +32,7 @@ from .engine import AppliedFix, FixEngine, FixReport, SkippedFix  # noqa: F401
 from .verify import FixVerification, verify_fixer, verify_no_op  # noqa: F401
 
 # Importing the modules registers the fixers.
-from . import choices, geometry, lossy, safe  # noqa: F401,E402
+from . import choices, cleanup, geometry, lossy, safe  # noqa: F401,E402
 
 __all__ = [
     "AppliedFix",

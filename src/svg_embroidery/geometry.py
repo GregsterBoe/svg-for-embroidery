@@ -341,6 +341,104 @@ def flatten_path(d: str, tolerance: float = DEFAULT_TOLERANCE_MM) -> List[Contou
     return contours
 
 
+def contour_area(contour: Contour) -> float:
+    """Signed area a closed contour encloses, by the shoelace formula.
+
+    The sign is the winding direction, which is how a hole tells itself apart
+    from a shape: with the contours of one ``<path>`` read in document order,
+    a shell and the holes cut out of it come back with opposite signs.
+
+    Pure Python and exact for a polygon, so B5's "is this shape big enough to
+    hold a stitch" runs wherever the checker does — no backend, no phone
+    problem. Everything that needs to know how two shapes *interact* still
+    needs one; area is the question that doesn't.
+    """
+    points = contour.points
+    if len(points) >= 2 and points[0] == points[-1]:
+        points = points[:-1]
+    if len(points) < 3:
+        return 0.0
+    total = 0.0
+    for index in range(len(points)):
+        x0, y0 = points[index]
+        x1, y1 = points[(index + 1) % len(points)]
+        total += x0 * y1 - x1 * y0
+    return total / 2.0
+
+
+def simplify_contour(contour: Contour, tolerance: float) -> Contour:
+    """Drop points a straight line already accounts for (Ramer–Douglas–Peucker).
+
+    Used on the *output of a boolean repair*, not as a fixer of its own. A
+    backend hands back polygons at whatever density the input had, and the
+    input was a curve flattened to :data:`DEFAULT_TOLERANCE_MM` — so the result
+    carries a point every fraction of a stitch along boundaries the repair
+    never touched. Those points are stitches nobody asked for.
+
+    Simplifying at the tolerance the shape was *measured* at adds no error that
+    the measurement did not already have, which is the only claim being made
+    here: the repair may not pretend to more precision than the number that
+    triggered it.
+    """
+    points = contour.points
+    closed = contour.closed or (len(points) >= 2 and points[0] == points[-1])
+    if len(points) >= 2 and points[0] == points[-1]:
+        points = points[:-1]
+    if len(points) < 4 or tolerance <= 0:
+        return contour
+
+    if closed:
+        # A ring has no ends to anchor the recursion on, so the two points
+        # furthest apart are used as the ends of two open runs.
+        first = 0
+        second = max(
+            range(len(points)), key=lambda i: math.dist(points[0], points[i])
+        )
+        kept = (
+            _simplify_run(points[first : second + 1], tolerance)[:-1]
+            + _simplify_run(points[second:] + points[:1], tolerance)[:-1]
+        )
+        if len(kept) < 3:
+            return contour
+        return Contour(points=kept + [kept[0]], closed=True)
+    return Contour(points=_simplify_run(points, tolerance), closed=False)
+
+
+def _simplify_run(points: Sequence[Point], tolerance: float) -> List[Point]:
+    """Douglas–Peucker over an open run, keeping both ends."""
+    if len(points) < 3:
+        return list(points)
+    start, end = points[0], points[-1]
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy)
+
+    worst, index = -1.0, 0
+    for position in range(1, len(points) - 1):
+        px, py = points[position]
+        if length == 0:
+            distance = math.dist(points[position], start)
+        else:
+            distance = abs(dy * (px - start[0]) - dx * (py - start[1])) / length
+        if distance > worst:
+            worst, index = distance, position
+
+    if worst <= tolerance:
+        return [start, end]
+    left = _simplify_run(points[: index + 1], tolerance)
+    right = _simplify_run(points[index:], tolerance)
+    return left[:-1] + right
+
+
+def simplify_contours(contours: Sequence[Contour], tolerance: float) -> List[Contour]:
+    """:func:`simplify_contour` over a list, dropping anything that collapses."""
+    result = []
+    for contour in contours:
+        simplified = simplify_contour(contour, tolerance)
+        if len(simplified.points) >= 3:
+            result.append(simplified)
+    return result
+
+
 def _numbers(value: Optional[str]) -> List[float]:
     if not value:
         return []

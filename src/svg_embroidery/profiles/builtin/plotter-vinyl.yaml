@@ -45,4 +45,10 @@ rules:
     params:
       min_mm: 1.0
 
+  # The same argument one step further: a 1 mm² fleck of vinyl is not weedable
+  # at all — it lifts with the waste or stays on the backing.
+  - id: geometry.min_area
+    params:
+      min_mm2: 1.0
+
   - id: fill.required

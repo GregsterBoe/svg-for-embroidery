@@ -702,10 +702,13 @@ A6's "explain why you can't" gate, **passes** once its four questions are
 answered: ❌ 9 errors → ✅ 0. Every answer is held to the same four invariants as
 any other fixer, via `verify_fixer(..., choice=...)`.
 
-> **Still open.** `fill.required`, `path.max_count`, `document.no_raster` and
+> **Still open.** `fill.required`, `document.no_raster` and
 > `geometry.aspect_ratio` still report "no automatic fix available". Each is a
-> plausible question — which colour, merge what, trace or drop, pad or crop —
-> and the mechanism is now the cheap part.
+> plausible question — which colour, trace or drop, pad or crop — and the
+> mechanism is now the cheap part. ~~`path.max_count`~~ was the fourth: **B5
+> gave it one**, asking whether to drop the smallest shapes and naming the
+> largest thing that would go, since "over the limit" means something different
+> for speckle than for artwork.
 
 ### Explicitly *not* in Phase A
 
@@ -831,7 +834,7 @@ judgement on real scans. Real images can be dropped in alongside.
 | `fit` | share of pixels the traced SVG gets wrong against its source (B0) | lower |
 | `gaps` | share of the traced SVG with no paint on it at all — the seams between colour layers (B4) | lower |
 | `verdict` | triage's good/marginal/hopeless, next to `expect` (B2) | — |
-| `passes` | does the converted SVG pass its profile (B6) — declared, still empty | — |
+| `passes` | does the traced SVG pass its profile — filled by B5 | — |
 
 Declaring a column before it can be filled is deliberate: the baseline grades it
 from the first run that fills it in, rather than needing the harness changed
@@ -1287,7 +1290,157 @@ its flat output is reported as a note on the run rather than quietly restructure
 > after all, and the check is still unwritten — it belongs with A5's opening,
 > not here.
 
-### B5. Vector cleanup · size M
+### B5. Vector cleanup · ✅ CLEARED
+
+Lives in `cleanup.py` (the policy), `fixes/cleanup.py` (two repairs) and one new
+rule. There is **no new fixing machinery at all**: A2's engine already checks
+its own output, A7 already knows how to ask, and the whole of B5 is one rule the
+checker was missing, two repairs registered against rules, and a decision about
+what a run may do to a document nobody drew.
+
+**Gate met, twice.** `svgemb bench --preprocess --cleanup` against the same
+command without it — the corpus at `embroidery-basic`:
+
+| | traced | cleaned up |
+| --- | --- | --- |
+| subpaths over the corpus | 1856 | **611** |
+| nodes | 19827 | **13970** |
+| `fit`, mean | 0.073 | **0.070** |
+| images where `fit` got worse | — | **none** |
+
+**Two thirds of the shapes the machine was going to sew were shapes it cannot
+sew** — and removing them makes the render *closer* to the source, not further
+from it, because a fleck below the tracer's own resolution mostly rendered as a
+smudge anyway. The second reading is the profile that has an opinion about
+detail: at `embroidery-strict`, **11 of the 20 corpus images pass before cleanup
+and 16 after**, which is the gate as written.
+
+**The rule that was missing: `geometry.min_area`.** B4 handed this step a
+document whose one- and two-pixel islands are finally *in* the file, and
+`geometry.min_feature_size` could not see them — it measures a whole element,
+and a traced colour layer is one `<path>`, so fifty specks of a stitch each
+disappear into the 1% tolerance of a shape that is otherwise solid. **A
+tolerance is the right idea about a fraction of one shape and the wrong idea
+about a whole one:** every speck is a trim, a knot and a jump, whatever share of
+the design it represents. Measured: `logo-five-colour` *passes*
+`min_feature_size` under `embroidery-strict` while carrying seven flecks the new
+rule reports individually.
+
+It also **needs nothing installed**. The area of a flattened contour is the
+shoelace formula, so — the judgement A1 made about decoding PNG and A5 made
+about flattening — the check that catches what a tracer leaves behind runs on
+the phone that produced it. That is why it can sit in `embroidery-basic`, where
+A5's backend-dependent check deliberately cannot: a common-denominator profile's
+verdict must not vary with what a machine has. It warns there and fails in
+`embroidery-strict`, and `plotter-vinyl` gets it at 1 mm² because an unweedable
+fleck of vinyl is the same problem with a blade.
+
+**A hole is reported as a hole.** The winding direction is read relative to the
+element's largest contour rather than assumed, so a design drawn clockwise is
+not reported as one enormous hole — and a 0.5 mm² *hole* is worth a different
+sentence from a 0.5 mm² *island*: the needle fills one in and cannot make the
+other. `scan-clean` traced 29 tiny holes in its paper layer and not one island;
+deleting them moved **zero pixels** and removed 29 shapes from the stitch file.
+
+**`path.max_count` was counting the wrong thing**, and B4's output is what made
+it obvious. Traced `hatching` puts 864 shapes into two `<path>` elements, so a
+rule reading "at most 60 shapes" reported *two* — the design in the corpus that
+most needed that warning was the one guaranteed never to get it. Whether
+outlines are packed into one element is the exporter's house style; B0's
+benchmark already counted subpaths for exactly this reason, and the rule now
+does too. The message says `864 shapes found (in 2 element(s))`, because a
+number that surprising should show its working.
+
+**The repairs are text surgery, not geometry, and that is the point.** Applying
+A5's `min_feature_size` fixer to a traced layer to remove one fleck rebuilds the
+*whole layer* as a polyline, because a boolean result has no curves in it:
+measured on `scan-clean`, 207 nodes became 414 to delete 2% of the area. Cutting
+the subpath out of the `d` attribute leaves every surviving curve byte for byte
+as the tracer wrote it — A0's principle for start tags, one level down — and
+costs nothing. So B5's rule is: **reshaping is how you rescue a shape that is
+mostly fine; deleting is how you drop one that was never viable**, and the two
+are different repairs with different prices.
+
+**Simplification landed where it was needed, not as a fixer of its own.** The
+plan said "simplify curves until `path.max_count` is satisfied", and that turns
+out to be two mistakes in one line: simplifying curves reduces *nodes*, and
+`path.max_count` counts *shapes*, so it could never satisfy that rule. A
+free-standing curve simplifier has no failing rule to attach to either, and A3
+already refused that trade once — a fixer needs a rule, and inventing a rule to
+justify a fixer is backwards. What does need it is the *output of the boolean
+repair*, which comes back at the density of its input: a curve flattened to a
+fiftieth of a millimetre, i.e. a point every fraction of a stitch along
+boundaries the repair never touched. Douglas–Peucker at the tolerance the shape
+was **measured** at adds no error the measurement did not already have, and it
+cuts that back by a third to a half (`scan-clean` 414 → 273 nodes,
+`line-art-thin` 100 → 55). It also made A5's repair *more* idempotent on traced
+line art, not less, which was not the expected direction.
+
+**What cleanup is allowed to do, and it is not the same as `svgemb fix`.**
+`cleanup.py` exists for this one decision. Repairing a designer's file is
+careful because there is intent in it — a hairline may be a mistake or may be
+the whole point. A traced document has none: it was generated milliseconds ago
+from an image, by us, and the artwork of record is still the image. So the
+conversion path runs at the top risk level, and three things keep that honest:
+the engine still verifies its own work, every removal is reported, and **only
+one kind of question is answered in advance**. `geometry.min_area` asks "may I
+delete these 29 flecks", and the profile has already said in millimetres that a
+fleck that size is not stitchable — the question exists to get consent, so
+cleanup gives it. `path.max_count` asks which artwork to sacrifice to a shape
+count, and nothing in a profile ranks one shape above another, so that one is
+left open and reported. It is a one-entry list in one place, because adding to
+it is a decision about what the tool may do to someone's work unasked.
+
+**`path.max_count` now asks**, which fills one of the four gaps A7 left open.
+The answer names its own price — *"drop the 237 smallest shape(s) to get within
+60; the largest one removed would be 3.56 mm²"* — because "over the limit"
+means two completely different things depending on whether the extra shapes are
+speckle or artwork, and only the person looking at it can say which.
+
+**The safety net fired, and that is the most useful thing that happened.**
+`hatching` at `embroidery-strict` is a crosshatch of hairlines: cleanup removed
+793 specks and trimmed the thin runs, the result repainted 25.8% of the image
+against a declared budget of 25%, and the engine **discarded its own output**
+and handed back the file it was given. A design made of detail below the needle
+cannot be cleaned into one that isn't, and the run says so rather than returning
+a blank. A2 built that check for a lying fixer; it turns out to work just as
+well as a limit on how much of a picture a legitimate repair may eat.
+
+**What it costs, stated rather than buried.**
+
+- *Nodes go up where thin detail is removed.* Under `embroidery-strict` the
+  corpus loses 9% of its subpaths and gains 5% of its nodes, because
+  `min_feature_size`'s boolean repair is doing real work on four images. That is
+  the price of a file that can actually be sewn, and simplification already
+  halved it.
+- *Deleting an island can leave a few pixels of bare fabric where it stood* —
+  B4's trap grew the layer beneath it by one pixel, which covers a 2 px fleck
+  entirely and a 3 px one all but its centre. Measured: `gaps` 0.000047 →
+  0.000133 on `logo-five-colour`, nine pixels. The residue is the *interior of a
+  shape the profile has just declared too small to stitch*, so the alternative
+  to a sub-millimetre unstitched dot is a sub-millimetre knot. The metric sees
+  it, which is the part that matters.
+- *Four images still fail at `embroidery-strict` after cleanup*, all four on
+  `geometry.min_feature_size`, and the reason is A5's: the opening leaves a stub
+  of up to half the minimum width where a thin part met a solid one, so on
+  artwork that is *mostly* too fine the repair reports progress without ever
+  reaching the bar. The run stops after `MAX_PASSES` with the rule still failing
+  — reported, not hidden. It is the honest answer for a line drawing at 1.5 mm,
+  and it is what B6's retry loop exists to argue with: lower the colour budget,
+  raise the working resolution, try again.
+
+**New column filled: `passes`**, declared empty by B1 and left that way by four
+steps. It says whether the traced document satisfies the profile it was aimed
+at, and it is filled whether or not cleanup ran — the interesting number is the
+difference between the two. B6 does not need the column, it needs the *retry*
+behind it. Worth knowing what it does not say: at `embroidery-basic` every
+corpus image passes, photographs included, because that profile checks colours
+and structure rather than detail. **Passing a profile is not the same as being
+worth stitching**, which is what B2 is for, and the two columns sit next to each
+other so nobody has to take one for the other.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Reuse Phase A's machinery on the tracer's raw output:
 
@@ -1309,6 +1462,17 @@ where it gets removed on purpose, by a rule the profile names, with the removal
 reported. A4's fixers and A5's `min_feature_size` repair are most of the
 machinery.
 
+</details>
+
+> **A knock-on effect worth knowing about.** A destructive repair on a rule in
+> `embroidery-basic` changes what `svgemb fix --allow destructive` demands: A6
+> refuses that flag unless every destructive repair the *profile* offers is
+> named, so the A7 gate command grew a fifth `--choose`. That is the guard
+> working rather than a regression — but it does mean a choice-free destructive
+> fixer on a common-denominator rule would have made `--allow destructive`
+> unusable for multi-rule runs, since `--only` narrows the run as well as naming
+> the rule. Any future destructive repair on a widely-used rule has to ask.
+
 ### B6. Close the loop · size M
 
 ```bash
@@ -1323,12 +1487,15 @@ what it changed and why.
 **Done when:** ≥80% of the corpus's "good" and "marginal" images convert to a
 passing SVG unattended, with the metrics to prove it.
 
-The `passes` column is left empty until then on purpose — the interesting part
-is the retry, not the single check. Though the single check is worth knowing
-about: B0's traced `logo-two-colour`, with no cleanup at all, already returns
-`✅ PASS: 0 error(s), 0 warning(s), 13 check(s) passed` against
-`embroidery-basic`. One image is not a result, but B5 and B6 evidently start
-closer to passing than this plan assumed.
+**B5 filled the `passes` column, and it says B6 has one image's worth of work
+to do.** The single check is not what this step is about — the retry is — but it
+sizes the job: at `embroidery-strict`, cleanup gets 11 of the 14 "good" and
+"marginal" images to a passing SVG unattended, which is 79% against a bar of
+80%. All three misses are `geometry.min_feature_size` on artwork that is mostly
+finer than the needle, which is exactly the failure a retry can argue with:
+raise the working resolution, lower the colour budget, trace again. The corpus
+put the gate one image away on purpose-built material, which is a better
+starting point than this plan assumed.
 
 ### B7. In the UI · size M
 
@@ -1349,7 +1516,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
-   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED
+   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
@@ -1361,15 +1528,14 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B0 through B4 are done, and what they add up to is a
-pipeline: a scan goes in and a layered, seam-free SVG comes out that
+**Where Phase B stands:** B0 through B5 are done, and what they add up to is a
+pipeline: a scan goes in and a layered, seam-free, cleaned-up SVG comes out that
 `svgemb check` passes. `scan-clean` went from `fit` 0.253 to 0.032, the corpus
-needs a third of the paths it did, and no image in it traces with a gap in it
-any more. **B5 is next**, and B4 sharpened what it is for: the trace now
-faithfully reproduces one- and two-pixel islands the tracer used to delete
-behind everyone's back, `geometry.min_feature_size` can finally see them, and
-dropping them is a decision that should be made and reported rather than
-inherited from a tracer's default.
+traces with a third of the paths it did and then loses two thirds of *those* to
+cleanup, no image traces with a gap in it any more, and 16 of the 20 images pass
+`embroidery-strict` where 11 did. **B6 is next**, and B5 sized it: the four
+images still failing all fail the same check, on artwork mostly finer than the
+needle, which is the case a retry with different settings exists for.
 
 The corpus is also still asking for two things nobody planned: a **deskew**
 stage (the only triage miss left is `scan-skewed`, and nothing measures

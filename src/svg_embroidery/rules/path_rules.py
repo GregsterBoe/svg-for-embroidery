@@ -89,20 +89,48 @@ class ClosedPathsRule(Rule):
 
 @register
 class PathCountRule(Rule):
+    """How many separate shapes the machine has to fill.
+
+    **Counted as subpaths, not as elements** (B5). One ``<path>`` may hold a
+    hundred outlines, and whether it does is the exporter's house style rather
+    than a fact about the design: B4's traced ``hatching`` puts 864 shapes into
+    two elements, so counting elements reported *two* against a limit of sixty
+    and the design that most needed this warning never got it. Subpaths are the
+    unit that survives the difference, and — the reason it matters — the unit
+    an embroidery machine sees: each one is an area to fill, with a trim and a
+    jump to reach it. B0's benchmark already counts them this way, for exactly
+    the same reason.
+    """
+
     id = "path.max_count"
-    summary = "Limit how many paths a design may contain"
+    summary = "Limit how many separate shapes a design may contain"
     params = {"max_paths": 200}
     default_severity = Severity.WARNING
 
     def check(self, doc: SvgDocument) -> Iterable[Finding]:
-        count = len(doc.by_tag("path", *IMPLICITLY_CLOSED))
+        elements = doc.by_tag("path", *IMPLICITLY_CLOSED)
+        count = shape_count(doc)
         limit = int(self.config["max_paths"])
+        # Only worth saying when the two numbers differ; on hand-drawn artwork
+        # they usually don't, and on traced artwork they differ enormously.
+        packed = (
+            f" (in {len(elements)} element(s))" if count != len(elements) else ""
+        )
         if count > limit:
             return [
                 self.fail(
-                    f"{count} shapes found, more than the recommended {limit}.",
+                    f"{count} shapes found{packed}, more than the recommended {limit}.",
                     hint="Very detailed designs stitch badly; simplify the artwork.",
                     count=count,
+                    elements=len(elements),
                 )
             ]
-        return [self.ok(f"Shape count OK: {count} of max {limit}.")]
+        return [self.ok(f"Shape count OK: {count}{packed} of max {limit}.")]
+
+
+def shape_count(doc: SvgDocument) -> int:
+    """Separate shapes in the document — subpaths, plus one per basic shape."""
+    total = len(doc.by_tag(*IMPLICITLY_CLOSED))
+    for node in doc.by_tag("path"):
+        total += len(list(iter_subpaths(node.element.get("d") or "")))
+    return total

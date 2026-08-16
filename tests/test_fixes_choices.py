@@ -224,7 +224,13 @@ def test_a_choice_fixer_still_gets_rolled_back_if_it_breaks_something():
 # -- the whole point ---------------------------------------------------------
 
 def test_answering_everything_gets_the_unfixable_file_through(tmp_path, capsys):
-    """``bad-design.svg`` was built to be unfixable. With answers, it passes."""
+    """``bad-design.svg`` was built to be unfixable. With answers, it passes.
+
+    ``geometry.min_area`` is answered too even though this file has no specks
+    in it: A6 requires every destructive repair the *profile* offers to be
+    named, not every one the file happens to need, so that the list of what a
+    run may do is the same whichever file it is pointed at.
+    """
     target = tmp_path / "fixed.svg"
     code = main(
         [
@@ -234,6 +240,7 @@ def test_answering_everything_gets_the_unfixable_file_through(tmp_path, capsys):
             "--choose", "structure.color_layers=colors",
             "--choose", "element.forbidden=delete",
             "--choose", "path.closed=close",
+            "--choose", "geometry.min_area=drop",
             "-o", str(target),
         ]
     )

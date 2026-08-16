@@ -139,9 +139,11 @@ def test_verify_rejects_a_sample_that_does_not_fail():
 
 
 def test_verify_reports_a_missing_fixer():
-    # Nobody can automate "make the design fewer shapes", so this rule has no
-    # fixer and is the honest example of asking for one that does not exist.
-    result = verify_fixer(NO_VIEWBOX, "path.max_count")
+    # Nobody can automate "decide which colour this unfilled shape should be",
+    # so this rule has no fixer and is the honest example of asking for one
+    # that does not exist. (``path.max_count`` used to be the example here;
+    # B5 gave it one that asks.)
+    result = verify_fixer(NO_VIEWBOX, "fill.required")
     assert not result.ok
     assert "no fixer is registered" in result.summary()
 

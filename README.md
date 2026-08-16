@@ -182,9 +182,9 @@ is a commented template to copy.
 
 | Profile | For |
 | --- | --- |
-| `embroidery-basic` | The common denominator: 10–38 cm, ≤3 colours one per layer, no gradients, text as paths, closed contours, ≥1.5 mm strokes |
-| `embroidery-strict` | Small/cheap stitching: 8–30 cm, ≤2 colours, no strokes at all, ≤60 shapes, no detail finer than 1.5 mm |
-| `plotter-vinyl` | Cutting plotters: exactly 1 colour, closed contours, filled shapes only, no detail finer than 1 mm |
+| `embroidery-basic` | The common denominator: 10–38 cm, ≤3 colours one per layer, no gradients, text as paths, closed contours, ≥1.5 mm strokes, no specks under 2.25 mm² |
+| `embroidery-strict` | Small/cheap stitching: 8–30 cm, ≤2 colours, no strokes at all, ≤60 shapes, no detail finer than 1.5 mm and no shape smaller than one stitch |
+| `plotter-vinyl` | Cutting plotters: exactly 1 colour, closed contours, filled shapes only, no detail finer than 1 mm, nothing under 1 mm² to weed |
 | `example-shop` | Commented template showing palette restriction and severity overrides |
 
 ## Available checks
@@ -206,8 +206,9 @@ is a commented template to copy.
 | `document.no_raster` | No embedded bitmap `data:image` payloads |
 | `document.no_editor_metadata` | No leftover editor state (it can carry your file name) |
 | `path.closed` | Every path *and subpath* ends with `Z` |
-| `path.max_count` | Design doesn't exceed N shapes |
+| `path.max_count` | Design doesn't exceed N shapes (subpaths, not elements) |
 | `geometry.min_feature_size` | No filled detail finer than N mm (needs the geometry extra) |
+| `geometry.min_area` | No shape smaller than N mm² — a speck the needle can't sew |
 | `stroke.min_width` | Effective stroke width ≥ N mm |
 | `stroke.forbidden` | Filled shapes only, no strokes |
 | `fill.required` | Every visible shape has a fill |
@@ -380,6 +381,8 @@ tapping the option in the web UI. Four rules ask so far:
 | `color.no_gradients` | which flat colour replaces the ramp | its weighted average · its first stop (both lossy) |
 | `element.forbidden` | delete artwork the profile forbids | delete it (destructive) |
 | `path.closed` | close a gap too wide to be a slip | draw the segment (destructive) |
+| `geometry.min_area` | delete shapes too small to sew (B5) | drop all of them (destructive) |
+| `path.max_count` | drop the smallest shapes to get within the limit (B5) | drop the N smallest (destructive) |
 
 Every answer is still a fix: it is held to the same four invariants, so *keep
 the drawing order* is checked against a renderer and really does move no pixel.
@@ -393,9 +396,15 @@ its four questions answered it passes.
 ```bash
 svgemb fix examples/bad-design.svg --allow destructive \
   --choose color.no_gradients=average --choose structure.color_layers=colors \
-  --choose element.forbidden=delete --choose path.closed=close
+  --choose element.forbidden=delete --choose path.closed=close \
+  --choose geometry.min_area=drop
 # ❌ FAIL → ✅ PASS   9 → 0 error(s)
 ```
+
+`--allow destructive` has to name every destructive repair the *profile* offers,
+not just the ones this file needs — which is why `geometry.min_area` is answered
+here for a file that has no specks in it. The list of what a run may do is then
+the same whichever file it is pointed at.
 
 Check any of it against your own files:
 
@@ -656,7 +665,74 @@ previously reported nothing at all. Removing detail too fine for the needle is a
 decision that should be made and reported — that is B5 — not inherited from a
 tracer's default.
 
-The last empty column, "does it pass", waits for B6.
+**B5 — vector cleanup: removing what cannot be sewn, on purpose.** The step
+adds no fixing machinery. Phase A already has an engine that verifies its own
+output and repairs that report every change; B5 is one rule the checker was
+missing, two repairs registered against rules, and one decision about what a run
+may do to a document nobody drew.
+
+```bash
+make clean-up       # or: svgemb bench --preprocess --cleanup
+```
+
+| | traced | cleaned up |
+| --- | --- | --- |
+| subpaths over the corpus | 1856 | **611** |
+| nodes | 19827 | **13970** |
+| `fit`, mean | 0.073 | **0.070** |
+| images at `embroidery-strict` that pass | 11/20 | **16/20** |
+
+**Two thirds of the shapes the machine was going to sew were shapes it cannot
+sew** — and removing them makes the render *closer* to the source, because a
+fleck below the tracer's own resolution mostly rendered as a smudge anyway.
+
+**The rule that was missing: `geometry.min_area`.** B4 stopped the tracer
+silently deleting one- and two-pixel islands, and `geometry.min_feature_size`
+still could not see them: it measures a whole element — a traced colour layer is
+one `<path>` — and forgives up to a tolerance of its area, so fifty specks
+disappear into the rounding of a shape that is otherwise solid. A tolerance is
+the right idea about a fraction of one shape and the wrong idea about a whole
+one; every speck is a trim, a knot and a jump whatever share of the design it
+is. It needs **nothing installed** (the area of a flattened contour is the
+shoelace formula), so unlike the backend-dependent thinness check it can sit in
+the common-denominator profile without its verdict depending on the machine.
+
+**`path.max_count` was counting elements, and the traced `hatching` puts 864
+shapes in two of them** — so the design that most needed a "too many shapes"
+warning was guaranteed never to get it. It counts subpaths now, the unit an
+embroidery machine sees and the one B0's benchmark already used.
+
+**Deleting is not reshaping.** Using A5's thinness repair to remove one fleck
+rebuilds the whole layer as a polyline, because a boolean result has no curves
+in it — 207 nodes became 414 on `scan-clean` to delete 2% of the area. Cutting
+the subpath out of the `d` attribute instead leaves every surviving curve byte
+for byte as the tracer wrote it. Reshaping rescues a shape that is mostly fine;
+deleting drops one that was never viable.
+
+**Cleanup is allowed more than `svgemb fix` is, and the reason is written down.**
+Repairing a designer's file is careful because there is intent in it. A traced
+document has none — it was generated milliseconds ago from an image, and the
+artwork of record is still the image. So it runs at the top risk level, the
+engine still verifies every repair, every removal is reported, and exactly one
+kind of question is answered in advance: `geometry.min_area` asks "may I delete
+these 29 flecks" when the profile has already said in millimetres that a fleck
+that size cannot be sewn. `path.max_count` asks which artwork to sacrifice to a
+shape count — nothing in a profile ranks one shape above another — so that one
+is left open and reported.
+
+The safety net firing is the most useful thing that happened: `hatching` is a
+crosshatch of hairlines, cleanup would have repainted 25.8% of it against a
+declared budget of 25%, and the engine **discarded its own output** and handed
+back the file it was given. A design made of detail below the needle cannot be
+cleaned into one that isn't.
+
+The last empty column is filled: `passes` says whether the traced document
+satisfies the profile it was aimed at. Note what it does not say — at
+`embroidery-basic` every corpus image passes, photographs included, because that
+profile checks colours and structure rather than detail. **Passing a profile is
+not the same as being worth stitching**, which is what the `verdict` column
+beside it is for. B6 owns the interesting half: retrying with different settings
+when the answer is no.
 
 ### Optional capabilities
 

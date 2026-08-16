@@ -56,6 +56,12 @@ svgemb fix design.svg -I                       # answer its questions at the pro
 svgemb fix design.svg --choose structure.color_layers=runs
 svgemb fix design.svg --stdout > fixed.svg     # for a pipe (the report goes to stderr)
 
+svgemb assess photo.jpg                        # can this image become embroidery?
+svgemb assess ./photos -r                      # a whole folder, one line each
+svgemb assess photo.jpg -v                     # every reading, not just the deciding one
+svgemb assess photo.jpg --strict               # "marginal" counts as a failure
+svgemb assess --explain                        # the bands and their thresholds
+
 svgemb profiles                                # list all rulesets
 svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
@@ -67,7 +73,8 @@ svgemb doctor                                  # what this machine can do
 
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
 error (so it drops straight into CI). `svgemb fix` adds `3` — svgemb caught its
-own output misbehaving and refused to write it.
+own output misbehaving and refused to write it. `svgemb assess` returns `1` for
+a hopeless image (and, with `--strict`, a marginal one).
 
 As a library:
 
@@ -407,13 +414,13 @@ gradients, low-resolution junk — each measured against the profile it is aimed
 at:
 
 ```
-image              kind      expect         size   res   mm/px   colours    k    flat   quant   edges    thin
-logo-two-colour    logo      good        256x256   200   0.500        12    3   0.957   0.005   0.025   0.003
-line-art-thick     line-art  good        256x256   200   0.500         5    3   0.889   0.002   0.069   0.013
-line-art-thin      line-art  marginal    256x256   200   0.500         5    3   0.918   0.001   0.060   0.030
-hatching           line-art  hopeless    256x256   200   0.500         8    3   0.047   0.382   0.864   0.993
-photo-portrait     photo     hopeless    256x256   200   0.500      1356    3   0.000   0.926   0.084   0.080
-lowres-icon        junk      marginal      32x32    32   3.125         2    3   0.753   0.000   0.138       ·
+image              kind      expect     verdict       size   res   mm/px   colours    k    flat   quant   edges    thin
+logo-two-colour    logo      good          good    256x256   200   0.500        12    3   0.957   0.005   0.025   0.003
+line-art-thick     line-art  good          good    256x256   200   0.500         5    3   0.889   0.002   0.069   0.013
+line-art-thin      line-art  marginal  marginal    256x256   200   0.500         5    3   0.918   0.001   0.060   0.030
+hatching           line-art  hopeless  hopeless    256x256   200   0.500         8    3   0.047   0.382   0.864   0.993
+photo-portrait     photo     hopeless  hopeless    256x256   200   0.500      1356    3   0.000   0.926   0.084   0.080
+lowres-icon        junk      marginal  marginal      32x32    32   3.125         2    3   0.753   0.000   0.138       ·
 ```
 
 `flat` is how vector-like the image is, `quant` what reducing to the profile's
@@ -477,6 +484,60 @@ The interesting result was vtracer's. It is the **best** tracer here on scans
 0.036) — because it is not a better tracer, it is a tracer with photograph-tuned
 preprocessing bolted on. That is the clearest evidence yet for this phase's
 premise, and it puts a number on what B3's preprocessing is worth.
+
+**B2 — say "no" early, and say why.** Not every image can become embroidery.
+Triage grades one before anything is converted, out of the numbers B1 already
+takes — it measures nothing of its own, so `svgemb assess` and `svgemb bench`
+cannot disagree about an image.
+
+```bash
+svgemb assess photo.jpg
+```
+
+```
+🖼  photo-portrait.png   [profile: embroidery-basic]
+──────────────────────────────────────────────────────────────
+256x256; 1,356 colours; at 3 colours 93% of the image is repainted
+
+❌ HOPELESS
+   colour loss: reducing to 3 colours repaints 93% of the image, and what is
+      lost is smooth shading rather than detail — there are no flat regions
+      here to become stitches
+```
+
+The verdict is **the worst thing about the image**, and the report names the
+reading that decided — "hopeless" is only useful next to *why*. The `verdict`
+column in `svgemb bench` is the same call, printed next to the `expect` column
+that records what a human says before measuring anything, so the run grades its
+own thresholds:
+
+```
+triage agrees with 'expect' on 19/20 image(s)
+ℹ️  scan-clean  expected good, triage says marginal
+```
+
+**The judgement the whole thing rests on: on a speckled image, colour loss and
+flatness are measuring the grain, not the artwork.** Reduce a grainy scan of a
+two-colour drawing to three colours and every grain pixel moves — `quant`
+reports 0.87 about a design that is two flat colours. Left to vote, that number
+calls every scan hopeless. So when a colour boundary falls on more than 40% of
+the pixels (the three scans measure 0.62–0.67; everything else in the corpus is
+below 0.19), those two readings **abstain and say so**, for the same reason B1
+leaves a cell empty: a metric that cannot answer the question must not print a
+number.
+
+What can still be said under grain is whether anything survives the needle at
+all — and at `thin ≥ 0.95` nothing does, anywhere, which no amount of denoising
+can change. That is what separates the crosshatch (0.993, hopeless) from the
+scans (0.78–0.84, marginal).
+
+The one miss is **`scan-clean`**: a line drawing on paper that a human calls
+good and triage calls marginal, because 84% of it is finer than the needle and
+that 84% is grain. Telling the drawing from the paper needs the denoising B3
+owes, so this is the same gap B1 recorded — and the report says the word
+"denoising" out loud rather than implying the artwork is at fault. The error is
+one band, in the cautious direction, and it is pinned by a test that will start
+failing when B3 lands.
 
 The last empty column, "does it pass", waits for B6.
 

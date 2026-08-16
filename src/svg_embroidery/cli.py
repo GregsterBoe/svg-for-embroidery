@@ -217,6 +217,49 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
 
+    assess = subparsers.add_parser(
+        "assess",
+        help="say whether an image is worth converting to embroidery at all (B2)",
+        description=(
+            "Measure an image against the profile it is aimed at and grade it good, "
+            "marginal or hopeless — before anyone waits on a conversion. The numbers "
+            "are exactly the ones 'svgemb bench' prints; this command turns them into "
+            "a verdict and a reason."
+        ),
+        epilog=(
+            "Exit codes: 0 good or marginal, 1 hopeless (or marginal with --strict), "
+            "2 nothing could be read."
+        ),
+    )
+    # "*" rather than "+" so --explain works on its own; the check is below.
+    assess.add_argument("files", nargs="*", type=Path, help="image file(s) or directories")
+    assess.add_argument(
+        "-p",
+        "--profile",
+        default=DEFAULT_PROFILE,
+        help=f"profile name or path to a YAML ruleset (default: {DEFAULT_PROFILE})",
+    )
+    assess.add_argument(
+        "-v", "--verbose", action="store_true", help="show every reading, not just the deciding one"
+    )
+    assess.add_argument(
+        "--strict", action="store_true", help="treat 'marginal' as a failure too"
+    )
+    assess.add_argument(
+        "--work-side",
+        type=int,
+        metavar="N",
+        help="force the resolution the metrics run at (default: from the profile)",
+    )
+    assess.add_argument(
+        "--explain", action="store_true", help="describe the bands and their thresholds, then exit"
+    )
+    assess.add_argument("--json", action="store_true", help="machine readable output")
+    assess.add_argument("--no-color", action="store_true", help="plain ASCII output")
+    assess.add_argument(
+        "-r", "--recursive", action="store_true", help="descend into directories"
+    )
+
     serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
     serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
     serve.add_argument(
@@ -756,6 +799,100 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_images(paths: Sequence[Path], recursive: bool) -> List[Path]:
+    """Like :func:`_collect_files`, but for whatever this machine can decode.
+
+    Asking :mod:`svg_embroidery.raster` rather than hard-coding a list: without
+    Pillow a directory of JPEGs is genuinely empty to us, and globbing them in
+    only to report twenty identical "needs Pillow" lines helps nobody.
+    """
+    from .raster import readable_suffixes
+
+    suffixes = readable_suffixes()
+    files: List[Path] = []
+    for path in paths:
+        if path.is_dir():
+            found = path.rglob("*") if recursive else path.glob("*")
+            files.extend(
+                sorted(item for item in found if item.suffix.lower() in suffixes)
+            )
+        else:
+            files.append(path)
+    return files
+
+
+def _cmd_assess(args: argparse.Namespace) -> int:
+    from . import triage
+    from .bench import BenchError, measure_file
+
+    if args.explain:
+        print(triage.render_thresholds())
+        return 0
+    if not args.files:
+        print("error: assess needs at least one image (or --explain)", file=sys.stderr)
+        return 2
+
+    try:
+        load_profile(args.profile)  # a bad profile is a usage error, not a verdict
+    except ProfileError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    files = _collect_images(args.files, args.recursive)
+    missing = [path for path in files if not path.exists()]
+    for path in missing:
+        print(f"error: no such file: {path}", file=sys.stderr)
+    files = [path for path in files if path.exists()]
+    # Triage answers "should this image be converted at all"; an SVG is already
+    # past that question, and 'cannot identify image file' would not say so.
+    vectors = [path for path in files if path.suffix.lower() == ".svg"]
+    if vectors:
+        print(
+            f"error: {vectors[0]} is already a vector — 'svgemb check' is the one that "
+            "grades SVG files; assess takes the image you want converted",
+            file=sys.stderr,
+        )
+        return 2
+    if not files:
+        if not missing:
+            print("error: no images found", file=sys.stderr)
+        return 2
+
+    assessments = []
+    for path in files:
+        try:
+            row = measure_file(path, profile=args.profile, work_side=args.work_side)
+        except BenchError as exc:  # pragma: no cover - measure_file reports inside the row
+            print(f"error: {path}: {exc}", file=sys.stderr)
+            return 2
+        assessments.append(triage.assess(row, name=str(path)))
+
+    if args.json:
+        print(triage.render_json(assessments))
+    else:
+        for index, assessment in enumerate(assessments):
+            if index:
+                print()
+            print(
+                triage.render_assessment(
+                    assessment, verbose=args.verbose, color=not args.no_color
+                )
+            )
+        if len(assessments) > 1:
+            print()
+            print(triage.render_summary(assessments, color=not args.no_color))
+
+    # An image this machine cannot decode is not a verdict of "bad": it is a
+    # measurement we do not have. It only fails the run when *nothing* was read.
+    verdicts = [a.verdict for a in assessments if a.verdict is not None]
+    if not verdicts:
+        return 2
+    bad = {triage.Band.HOPELESS}
+    if args.strict:
+        bad.add(triage.Band.MARGINAL)
+    return 1 if any(verdict in bad for verdict in verdicts) else 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve  # imported lazily: only the CLI needs http.server
 
@@ -784,6 +921,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_doctor(args)
     if args.command == "bench":
         return _cmd_bench(args)
+    if args.command == "assess":
+        return _cmd_assess(args)
     if args.command == "serve":
         return _cmd_serve(args)
     parser.print_help()

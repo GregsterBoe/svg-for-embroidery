@@ -825,6 +825,7 @@ judgement on real scans. Real images can be dropped in alongside.
 | `paths` | subpaths in the traced SVG — shapes the machine has to fill (B0) | lower |
 | `nodes` | drawing commands in the traced SVG — where stitch count comes from (B0) | lower |
 | `fit` | share of pixels the traced SVG gets wrong against its source (B0) | lower |
+| `verdict` | triage's good/marginal/hopeless, next to `expect` (B2) | — |
 | `passes` | does the converted SVG pass its profile (B6) — declared, still empty | — |
 
 Declaring a column before it can be filled is deliberate: the baseline grades it
@@ -870,7 +871,70 @@ failing when B3 lands.
 carries doubles as the corpus reader. Pillow adds the other formats; without it
 a JPEG is a row you don't get, with the reason printed.
 
-### B2. Suitability triage · size S
+### B2. Suitability triage · ✅ CLEARED
+
+Lives in `triage.py`, behind `svgemb assess`. **It measures nothing.** It reads a
+B1 `Measurement` — same resolution, same profile, same numbers `svgemb bench`
+prints — and grades it, so the two commands cannot disagree about an image. The
+verdict is *the worst thing about the image*, and the report names the reading
+that decided, because "hopeless" is only useful next to why.
+
+**Gate met: 19/20 against the corpus's `expect` column**, and the run says so
+itself rather than leaving it to a test — `bench` gained a `verdict` column
+sitting next to `expect`, plus a grading line and the disagreements:
+
+```
+triage agrees with 'expect' on 19/20 image(s)
+ℹ️  scan-clean  expected good, triage says marginal
+```
+
+**The judgement the step rests on: on a speckled image, colour loss and flatness
+are measuring the grain, not the artwork.** Reduce a grainy scan of a two-colour
+drawing to three colours and every grain pixel moves — `quant` reports 0.87
+about a design that is two flat colours. Left to vote it calls every scan
+hopeless. So above `edges >= 0.40` those two readings **abstain and say so**,
+which is the project's own rule (*a metric that can't answer the question must
+not print a number*) applied to a verdict rather than a cell. The threshold is
+the widest margin in the model and the reason it is safe: the three scans
+measure 0.62–0.67 and the crosshatch 0.86, while **everything else in the corpus
+is below 0.19**.
+
+What *can* still be said under grain is whether anything survives the needle at
+all. At `thin >= 0.95` nothing does, anywhere — and denoising cannot create
+width, so that verdict survives B3. It is what separates `hatching` (0.993,
+hopeless) from the scans (0.78–0.84, marginal), which no amount of threshold
+tuning on the other metrics managed to do.
+
+Everything else is three ordinary thresholds, any of which costs a band:
+`quant > 0.15`, `thin > 0.02`, `flat < 0.85`. The tight ones are the first two —
+`logo-five-colour` at 0.181 against `alpha-logo` at 0.112, and `line-art-thin`
+at 0.030 against `line-art-thick` at 0.013 — and they are tight because the
+corpus was built to put those pairs either side of a line. That is the corpus
+doing its job, not a fudge.
+
+**The one miss is `scan-clean`, and the roadmap predicted it.** A line drawing
+on paper: a human says good, triage says marginal, because 84% of it is finer
+than the needle and that 84% is grain. B1 had already recorded this as the gap
+B3 exists to close. Two things make it acceptable rather than a failed gate: the
+error is **one band in the cautious direction**, and the report says the word
+*denoising* out loud rather than implying the artwork is at fault. A test pins
+it, so B3 landing makes the assertion fail and the exception gets deleted
+instead of forgotten.
+
+**What was tried and rejected: doing B3's job here.** The roadmap offered
+"either B2's thresholds run after B3's preprocessing, or B2 ships knowing it
+under-rates scans". The first option was measured before being dropped — a 3×3
+median filter, then a majority vote over the quantised labels, then up to four
+passes of it. Denoising does move the numbers a long way (`scan-skewed`'s `thin`
+0.782 → 0.176), but **it never separated the scans from the crosshatch**: after
+two passes `hatching` sits at 0.131 and `scan-clean` at 0.153, the wrong way
+round. A stand-in denoiser good enough to grade on is B3, and half of B3 built
+inside the triage step would have handed B3 a baseline to match rather than
+beat. So triage grades what it is given, and names denoising as the missing
+input.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Not every image can become embroidery, and saying so early is a feature.
 
@@ -887,6 +951,12 @@ word — plus a sentence explaining it, and a single-file entry point. Note the
 honest complication B1 turned up: the current metrics score a clean scan as
 hopeless (see B1), so either B2's thresholds run after B3's preprocessing, or
 B2 ships knowing it under-rates scans and says so.
+
+</details>
+
+> **Deliberately not in the web UI.** B7 is the step that owns the phone
+> journey — upload, preview, sliders, download — and triage is one panel of it.
+> Adding a lone assess button now would be guessing at that layout twice.
 
 ### B3. Preprocessing pipeline · size L
 
@@ -917,6 +987,16 @@ smooths the grain first, gets 0.030. **B3 succeeds when potrace reaches
 vtracer's number on scans without vtracer's habit of deleting thin strokes**
 (`line-art-thin`, where the same preprocessing costs it 0.224 against potrace's
 0.036).
+
+B2 added a third gate and a warning. The gate: `scan-clean` should come out of
+preprocessing graded **good**, which removes the one disagreement in the triage
+table. The warning is what B2's rejected spike found — a majority-vote denoiser
+run to convergence pulls `hatching` (0.993 → 0.131 `thin`) *past* `scan-clean`
+(0.844 → 0.153), i.e. it makes the hopeless image look better than the good one
+by smoothing the artwork away. **Preprocessing that improves every number is not
+automatically preprocessing that works**, and the triage table is where that
+shows up: if B3 moves `hatching` out of *hopeless*, B3 is deleting artwork, not
+denoising.
 
 ### B4. Layered tracing · size M
 
@@ -995,6 +1075,7 @@ B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 c
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
+   ✅ CLEARED
 ```
 
 A0/A1 are independent of each other, as are B0 and B2. B1 turned out *not* to be
@@ -1002,11 +1083,13 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B1 and B0 are done, and between them they left B3 a
-target rather than an intention — the `fit` column now says what preprocessing
-is worth in pixels, per image. **B2 is the only unblocked step**; its triage has
-its grading data ready in the corpus manifest's `expect` column and every metric
-it needs already computed. B3 is next after that and is the phase's real work.
+**Where Phase B stands:** B0, B1 and B2 are done, and all three point at the same
+next step. B0's `fit` column says what preprocessing is worth in pixels per
+image; B1 pinned `scan-clean` as the row that measures like junk and is not;
+B2 tried denoising well enough to grade on, failed, and named the failure. **B3
+is now the only unblocked step, and it is the phase's real work** — it arrives
+with three separate tests that should start failing when it lands, which is the
+best possible position to start from.
 
 ## Risks, named up front
 

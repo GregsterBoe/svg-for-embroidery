@@ -3,13 +3,14 @@
 
 PYTHON ?= python
 
-.PHONY: help test bench bench-save tracers corpus roundtrip doctor serve degraded
+.PHONY: help test bench bench-save triage tracers corpus roundtrip doctor serve degraded
 
 help:
 	@echo "make test         run the test suite"
 	@echo "make degraded     run it again with every optional extra disabled"
 	@echo "make bench        measure the image corpus against the baseline (B1)"
 	@echo "make bench-save   record the current numbers as the new baseline"
+	@echo "make triage       grade the corpus good/marginal/hopeless (B2)"
 	@echo "make tracers      compare every installed tracer on the corpus (B0)"
 	@echo "make corpus       regenerate the corpus images"
 	@echo "make roundtrip    prove the writer returns files unchanged (A0 gate)"
@@ -31,6 +32,11 @@ bench:
 
 bench-save:
 	$(PYTHON) -m svg_embroidery.cli bench --save
+
+# B2's gate: does triage put the corpus in the bands a human would? The answer
+# is the "triage agrees with 'expect'" line at the foot of the table.
+triage:
+	$(PYTHON) -m svg_embroidery.cli bench --tracer none --no-compare
 
 # B0's instrument: the same corpus through every tracer this machine has.
 tracers:

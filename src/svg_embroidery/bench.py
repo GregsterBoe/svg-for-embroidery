@@ -56,6 +56,7 @@ from .raster import (
 from .tracer import Backend as TracerBackend
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
 from .tracer import TracerError, default_backend
+from .triage import Band, assess
 from .visual import compare_rasters, render
 
 #: Where the corpus lives when nothing else is said. Kept out of ``tests/`` on
@@ -155,6 +156,10 @@ class Metric:
 
 
 METRICS: Sequence[Metric] = (
+    # First, so it sits next to the ``expect`` column it is graded against —
+    # B2's gate is "does triage separate the corpus", and this is where you read
+    # the answer off. No direction: a verdict that moves is news either way.
+    Metric("verdict", "verdict", 8, "text", "", "triage's answer: good / marginal / hopeless (B2)"),
     Metric("size", "size", 9, "text", "", "pixel dimensions of the source"),
     Metric("res", "res", 4, "int", "",
            "resolution the metrics ran at, chosen so the profile's minimum feature "
@@ -196,7 +201,14 @@ class Measurement:
     mm_px: Optional[float] = None
     colors: Optional[int] = None
     k: Optional[int] = None
+    #: The profile's thinnest stitchable line, in millimetres. Recorded so the
+    #: row is self-describing: ``thin`` means nothing without the width it was
+    #: measured against, and B2 quotes it back to the user.
+    min_mm: Optional[float] = None
     alpha: Optional[bool] = None
+    #: B2's word for this row, filled by :mod:`svg_embroidery.triage` from the
+    #: numbers beside it. Not measured separately — see that module.
+    verdict: Optional[str] = None
     flat: Optional[float] = None
     quant: Optional[float] = None
     edges: Optional[float] = None
@@ -368,6 +380,7 @@ def measure(
     work = downsample(source, scale.work_side)
     row.res = max(work.width, work.height)
     row.mm_px = round(scale.mm_per_pixel, 3)
+    row.min_mm = scale.min_mm
     row.colors = unique_colors(work)
     row.k = color_budget(profile)
     row.flat = flat_ratio(work)
@@ -385,7 +398,40 @@ def measure(
 
     if backend is not None:
         trace_row(row, reduced, canvas_and_stroke(profile)[0], backend)
+
+    # B2 grades the row it is handed rather than measuring again, so ``svgemb
+    # assess`` and ``svgemb bench`` cannot disagree about an image. Last, so the
+    # verdict sees every cell — including the ones the tracer filled in.
+    verdict = assess(row).verdict
+    row.verdict = verdict.value if verdict else None
     return row
+
+
+def measure_file(
+    path: Path,
+    profile: str = "embroidery-basic",
+    work_side: Optional[int] = None,
+    backend: Optional[TracerBackend] = None,
+) -> Measurement:
+    """Measure one image off the corpus — B2's single-file entry point.
+
+    Deliberately the same :func:`measure` underneath: an image assessed on its
+    own has to score exactly what it would score as a corpus row, or the
+    benchmark stops describing the tool.
+    """
+    path = Path(path)
+    return measure(
+        CorpusEntry(
+            name=path.name,
+            file=path.name,
+            profile=profile,
+            category="",
+            expect="",
+            directory=path.parent,
+        ),
+        work_side=work_side,
+        backend=backend,
+    )
 
 
 @dataclass
@@ -607,6 +653,38 @@ def _cell(key: str, value: Any) -> str:
     return str(value)
 
 
+def graded(bench: BenchRun) -> List[Measurement]:
+    """Rows whose ``expect`` is a real band, so triage can be graded on them."""
+    bands = {band.value for band in Band}
+    return [
+        row for row in bench.measured if row.expect in bands and row.verdict is not None
+    ]
+
+
+def disagreements(bench: BenchRun) -> List[Measurement]:
+    """Rows where triage and the human ``expect`` column do not match.
+
+    B2's gate — *it correctly separates the corpus* — is this list being short
+    and every entry on it having a reason. Printed with the run rather than
+    hidden in a test, because it is the number that says whether the thresholds
+    still hold as the corpus grows.
+    """
+    return [row for row in graded(bench) if row.verdict != row.expect]
+
+
+def _grading(bench: BenchRun) -> List[str]:
+    rows = graded(bench)
+    if not rows:
+        return []
+    wrong = disagreements(bench)
+    lines = [
+        f"triage agrees with 'expect' on {len(rows) - len(wrong)}/{len(rows)} image(s)"
+    ]
+    for row in wrong:
+        lines.append(f"ℹ️  {row.name}  expected {row.expect}, triage says {row.verdict}")
+    return lines
+
+
 def render_table(bench: BenchRun, color: bool = True) -> str:
     """The corpus, one row per image."""
     name_width = max([len(row.name) for row in bench.rows] + [len("image")])
@@ -666,6 +744,7 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
         else "no tracer here"
     )
     lines.append(f"{summary}  ·  {resolution}  ·  {traced}")
+    lines.extend(_grading(bench))
     if bench.unmeasured:
         lines.append(
             "ℹ️  A format this machine cannot decode is a row you don't get, not a "

@@ -1,8 +1,11 @@
-"""B0: the tracers, and the wrapper that makes them comparable."""
+"""B0: the tracers, and the wrapper that makes them comparable.
+B4: the layered document it assembles out of them, and its seams."""
 
 import pytest
 
+from svg_embroidery.checker import Checker
 from svg_embroidery.document import parse_svg
+from svg_embroidery.findings import Severity
 from svg_embroidery.raster import Quantisation
 from svg_embroidery.tracer import (
     ALL_BACKENDS,
@@ -13,11 +16,18 @@ from svg_embroidery.tracer import (
     count_nodes,
     default_backend,
     hex_color,
+    layer_order,
     layered_svg,
     measure_svg,
     pbm_bytes,
+    trapped_claims,
 )
-from svg_embroidery.visual import compare_rasters, default_renderer, render
+from svg_embroidery.visual import (
+    compare_rasters,
+    default_renderer,
+    render,
+    show_through,
+)
 
 WHITE = (255, 255, 255)
 BLACK = (26, 26, 26)
@@ -32,6 +42,20 @@ def quantisation(width, height, ink, palette=(WHITE, BLACK)):
     )
 
 
+def labelled(width, height, rows, palette):
+    """A quantisation written out as a grid of palette indices."""
+    indices = [value for row in rows for value in row]
+    assert len(indices) == width * height
+    return Quantisation(
+        palette=list(palette), indices=indices, width=width, height=height
+    )
+
+
+def covered_by(claims, position):
+    """Which pixels the layer at ``position`` in the order ends up painting."""
+    return [bool(claim >> position & 1) for claim in claims]
+
+
 def disc(cx, cy, r):
     return lambda x, y: (x - cx) ** 2 + (y - cy) ** 2 <= r * r
 
@@ -40,8 +64,8 @@ def ring(cx, cy, outer, inner):
     return lambda x, y: inner * inner < (x - cx) ** 2 + (y - cy) ** 2 <= outer * outer
 
 
-def traced(backend, quant, canvas_mm=100.0):
-    return backend.trace(quant, canvas_mm=canvas_mm)
+def traced(backend, quant, canvas_mm=100.0, overlap=1):
+    return backend.trace(quant, canvas_mm=canvas_mm, overlap=overlap)
 
 
 installed = pytest.mark.skipif(
@@ -118,6 +142,92 @@ def test_one_layer_is_one_path_so_its_holes_stay_holes():
     """
     svg = layered_svg([Layer(1, BLACK, 0.3, ["M0,0L9,0L9,9Z", "M3,3L6,3L6,6Z"])], 9, 9)
     assert svg.count("<path") == 1
+
+
+# -- B4: what order the layers go in -----------------------------------------
+
+def test_the_biggest_colour_is_stitched_first_so_it_sits_underneath():
+    quant = quantisation(8, 8, disc(4, 4, 2))  # a little ink on a lot of paper
+    assert layer_order(quant) == [0, 1]
+
+
+def test_a_dark_background_still_goes_underneath():
+    """The counterexample that settles it: area decides, darkness does not.
+
+    'Darkest last, so light backgrounds sit underneath' is true of the usual
+    case and wrong as a rule — it is a claim about a colour, and stacking is a
+    question about shape. On a dark background it puts the background on top of
+    the artwork, which is not a seam, it is a blank picture.
+    """
+    quant = quantisation(8, 8, disc(4, 4, 2), palette=(BLACK, WHITE))
+    assert layer_order(quant) == [0, 1]  # black paper first, white ink over it
+
+
+def test_two_colours_covering_the_same_area_are_split_darkest_last():
+    """Where there is no fact about shape to read, the roadmap's instinct wins."""
+    half = labelled(2, 2, [[0, 1], [0, 1]], (BLACK, WHITE))
+    assert layer_order(half) == [1, 0]  # equal areas: the white one goes under
+
+
+# -- B4: the seam overlap ----------------------------------------------------
+
+def test_a_layer_is_grown_into_the_pixels_of_layers_stitched_after_it():
+    #  0 0 0
+    #  0 1 0   — one pixel of colour 1, painted last, in a field of colour 0
+    #  0 0 0
+    quant = labelled(3, 3, [[0, 0, 0], [0, 1, 0], [0, 0, 0]], (WHITE, BLACK))
+    claims = trapped_claims(quant, layer_order(quant), overlap=1)
+    assert covered_by(claims, 0) == [True] * 9  # the background now runs underneath
+    assert covered_by(claims, 1) == [
+        False, False, False, False, True, False, False, False, False
+    ]
+
+
+def test_the_topmost_layer_is_never_grown():
+    """It has nothing above it to hide the growth, so growing it would move the art."""
+    quant = labelled(3, 3, [[0, 0, 0], [0, 1, 0], [0, 0, 0]], (WHITE, BLACK))
+    top = covered_by(trapped_claims(quant, layer_order(quant), overlap=3), 1)
+    assert sum(top) == 1
+
+
+def test_growth_stops_at_the_layers_that_paint_over_it():
+    """Three colours: the middle one may spread under the top one and no further.
+
+    Not a detail — spreading into a layer stitched *earlier* would paint over
+    artwork that is already down, which is the difference between a seam
+    allowance and a mistake.
+    """
+    #  0 0 | 1 1 | 2 2   — three vertical bands, 0 the widest
+    quant = labelled(6, 1, [[0, 0, 0, 1, 1, 2]], (WHITE, RED, BLACK))
+    order = layer_order(quant)
+    assert order == [0, 1, 2]
+    claims = trapped_claims(quant, order, overlap=1)
+    assert covered_by(claims, 0) == [True, True, True, True, False, False]
+    assert covered_by(claims, 1) == [False, False, False, True, True, True]
+    assert covered_by(claims, 2) == [False, False, False, False, False, True]
+
+
+def test_no_pixel_is_left_for_the_page_to_show_through():
+    """The property the whole step is for, stated on the labels themselves."""
+    quant = labelled(4, 2, [[0, 0, 1, 1], [0, 2, 2, 1]], (WHITE, RED, BLACK))
+    order = layer_order(quant)
+    claims = trapped_claims(quant, order, overlap=1)
+    for position in range(len(order)):
+        mask = covered_by(claims, position)
+        for index, painted in enumerate(mask):
+            if not painted:
+                continue
+            # Anything a layer covers is either its own, or belongs to a layer
+            # painted after it — never to one painted before.
+            owner = order.index(quant.indices[index])
+            assert owner >= position
+
+
+def test_no_overlap_means_no_overlap():
+    quant = labelled(3, 3, [[0, 0, 0], [0, 1, 0], [0, 0, 0]], (WHITE, BLACK))
+    claims = trapped_claims(quant, layer_order(quant), overlap=0)
+    assert sum(covered_by(claims, 0)) == 8
+    assert sum(covered_by(claims, 1)) == 1
 
 
 # -- the backends themselves -------------------------------------------------
@@ -210,3 +320,107 @@ def test_an_empty_colour_costs_no_layer():
 def test_a_tracer_says_which_version_answered():
     for backend in available_backends():
         assert backend.version(), f"{backend.name} could not say what it is"
+
+
+# -- B4's gate: a three-colour logo, three layers, no seams ------------------
+
+def three_colour_logo(side=64):
+    """White page, a red half, a black disc across the join.
+
+    Built so that every pair of colours actually touches — a seam can only show
+    where two layers meet, so a fixture whose colours never meet would prove
+    nothing.
+    """
+    def label(x, y):
+        if (x - side // 2) ** 2 + (y - side // 2) ** 2 <= (side // 4) ** 2:
+            return 1  # black disc
+        return 2 if x < side // 2 else 0  # red left half, white right
+
+    return Quantisation(
+        palette=[WHITE, BLACK, RED],
+        indices=[label(x, y) for y in range(side) for x in range(side)],
+        width=side,
+        height=side,
+    )
+
+
+@installed
+def test_a_three_colour_logo_traces_to_three_single_coloured_layers():
+    for backend in available_backends():
+        if backend.kind != "mask":
+            continue  # a colour tracer writes its own document; that is a finding
+        result = traced(backend, three_colour_logo(), canvas_mm=120.0)
+        assert result.layers == 3, backend.name
+
+        report = Checker.from_profile_name("embroidery-basic").check_source(result.svg)
+        failed = {
+            finding.rule_id
+            for finding in report.findings
+            if finding.severity is Severity.ERROR
+        }
+        # The point of tracing one mask per colour: the layer rule passes by
+        # construction rather than by repair.
+        assert "structure.color_layers" not in failed, backend.name
+        assert "color.max_count" not in failed, backend.name
+
+
+#: What counts as "no seam left". Not zero: three layers meeting at a point
+#: leave a few pixels a fraction short, because the layer that should cover the
+#: junction is doing it with a one-pixel spur and a tracer smooths those away.
+#: 0.0005 is the benchmark's own epsilon for a ratio that has not moved, and the
+#: measured residue is a tenth of it. Growing everything by a second pixel does
+#: close it, and costs a millimetre of extra stitching everywhere to do it.
+SEAM_BUDGET = 0.0005
+
+
+@installed
+@renderable
+def test_the_layers_meet_with_no_bare_fabric_between_them():
+    """B4's gate. Butt joints leave a hairline; the overlap closes it."""
+    quant = three_colour_logo()
+    for backend in available_backends():
+        if backend.kind != "mask":
+            continue
+        butted = show_through(render(traced(backend, quant, overlap=0).svg, width=quant.width))
+        trapped = show_through(render(traced(backend, quant, overlap=1).svg, width=quant.width))
+        assert butted.area > 0.001, backend.name
+        assert butted.worst < 128, backend.name  # an outright hole, not a soft edge
+        assert trapped.area < SEAM_BUDGET, f"{backend.name}: {trapped}"
+        assert trapped.worst > 230, f"{backend.name}: {trapped}"
+
+
+@installed
+@renderable
+def test_closing_the_seams_does_not_move_the_artwork():
+    """The claim the design rests on: the overlap changes gaps and little else.
+
+    A layer is grown *only* into pixels that later layers paint over, so every
+    colour's visible edge is still drawn by its own outline. What that does not
+    quite promise is that the outline comes out identical: a tracer fits a
+    layer's boundary as a whole, so changing the mask at the disc can shift a
+    straight run somewhere else by a fraction of a pixel. Here that happens to
+    two pixels out of four thousand, and it moves them *towards* the source
+    colour — so the run is also held to being no less faithful than the butt
+    joint it replaces, which is the property anyone actually cares about.
+    """
+    quant = three_colour_logo()
+    want = quant.raster()
+    for backend in available_backends():
+        if backend.kind != "mask":
+            continue
+        butted = render(traced(backend, quant, overlap=0).svg, width=quant.width)
+        trapped = render(traced(backend, quant, overlap=1).svg, width=quant.width)
+        before, after = butted.composite_over(), trapped.composite_over()
+
+        solid_moved = 0
+        for pixel in range(quant.width * quant.height):
+            moved = max(
+                abs(before[pixel * 3 + c] - after[pixel * 3 + c]) for c in range(3)
+            )
+            if moved > 8 and butted.pixels[pixel * 4 + 3] == 255:
+                solid_moved += 1
+        assert solid_moved <= 0.002 * quant.width * quant.height, backend.name
+
+        assert (
+            compare_rasters(want, trapped).ratio <= compare_rasters(want, butted).ratio
+        ), f"{backend.name} traced the artwork less faithfully with the overlap on"

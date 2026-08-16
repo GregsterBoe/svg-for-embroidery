@@ -220,6 +220,15 @@ def build_parser() -> argparse.ArgumentParser:
         "numbers then describe the cleaned image, so such a run is never "
         "diffed against a baseline taken without it",
     )
+    bench.add_argument(
+        "--overlap",
+        type=int,
+        metavar="N",
+        default=None,
+        help="working pixels each colour is grown under the ones stitched after "
+        "it, so the seams between layers cannot show as bare fabric (B4); "
+        "0 traces butt joints, which is what the 'gaps' column measures",
+    )
     bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
@@ -731,12 +740,18 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             return 2
         entries = [entry for entry in entries if entry.name in wanted]
 
+    overlap = bench_module.DEFAULT_OVERLAP if args.overlap is None else args.overlap
+    if overlap < 0:
+        print("error: --overlap cannot be negative", file=sys.stderr)
+        return 2
+
     if args.tracers:
         runs = bench_module.compare_tracers(
             entries,
             work_side=args.work_side,
             corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
             preprocess=args.preprocess,
+            overlap=overlap,
         )
         print(bench_module.render_tracer_comparison(runs, color=color))
         return 0
@@ -753,6 +768,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
         backend=backend,
         preprocess=args.preprocess,
+        overlap=overlap,
     )
 
     # A subset run must never overwrite a whole-corpus baseline with three rows.
@@ -763,12 +779,19 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         try:
             baseline = bench_module.load_baseline(baseline_path)
         except bench_module.BenchError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        blocked = bench_module.incomparable(baseline, result)
+            # A baseline this build cannot read is a reason to stop — unless the
+            # run was already going to replace it. The message says "re-record
+            # with --save", so --save has to work when it is the only way out.
+            if not args.save:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            blocked = [str(exc)]
+            baseline = None
+        if baseline is not None:
+            blocked = bench_module.incomparable(baseline, result)
         if not blocked:
             changes = bench_module.compare(baseline, result)
-        if args.only:  # only the rows we actually measured can have moved
+        if args.only and changes is not None:  # only measured rows can have moved
             changes = [change for change in changes if change.name in {e.name for e in entries}]
 
     if args.json:

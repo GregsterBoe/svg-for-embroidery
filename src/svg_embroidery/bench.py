@@ -54,10 +54,11 @@ from .raster import (
     unique_colors,
 )
 from .tracer import Backend as TracerBackend
+from .tracer import DEFAULT_OVERLAP
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
 from .tracer import TracerError, default_backend
 from .triage import Band, assess
-from .visual import compare_rasters, render
+from .visual import compare_rasters, render, show_through
 
 #: Where the corpus lives when nothing else is said. Kept out of ``tests/`` on
 #: purpose: it is a measuring instrument that happens to be checked in, not a
@@ -69,7 +70,12 @@ DEFAULT_BASELINE = Path(__file__).resolve().parents[2] / "bench" / "baseline.jso
 #: different when it moved by more than this, or every run is a "regression".
 RATIO_EPSILON = 0.0005
 
-BASELINE_VERSION = 1
+#: Bumped when a baseline recorded by an older build would be *silently*
+#: misread — a new column it cannot supply, or a new condition it never
+#: recorded. 2: B4's ``gaps`` column and the seam overlap the run was taken at.
+#: An old baseline is refused with the command to re-record it, rather than
+#: diffed against and reported as twenty regressions.
+BASELINE_VERSION = 2
 
 
 class BenchError(Exception):
@@ -182,6 +188,9 @@ METRICS: Sequence[Metric] = (
            "drawing commands in the traced SVG — where stitch count comes from"),
     Metric("fit", "fit", 6, "ratio", "lower",
            "share of pixels the traced SVG gets wrong against the quantised source"),
+    Metric("gaps", "gaps", 6, "ratio", "lower",
+           "share of the traced SVG left unpainted — the seams between colour "
+           "layers, which show as hairlines of bare fabric (B4)"),
     Metric("passes", "passes", 6, "text", "", "does the converted SVG pass its profile (B6)"),
 )
 
@@ -216,6 +225,7 @@ class Measurement:
     paths: Optional[int] = None
     nodes: Optional[int] = None
     fit: Optional[float] = None
+    gaps: Optional[float] = None
     passes: Optional[str] = None
     #: Wall-clock seconds the tracer took on this image. Deliberately *not* a
     #: metric: it is a property of the machine as much as of the code, and
@@ -322,7 +332,11 @@ def color_budget(profile: Profile) -> int:
 
 
 def trace_row(
-    row: Measurement, reduced: Quantisation, canvas_mm: float, backend: TracerBackend
+    row: Measurement,
+    reduced: Quantisation,
+    canvas_mm: float,
+    backend: TracerBackend,
+    overlap: int = DEFAULT_OVERLAP,
 ) -> None:
     """Fill in the columns that describe the traced SVG, or say why they are empty.
 
@@ -332,7 +346,7 @@ def trace_row(
     else.
     """
     try:
-        traced = backend.trace(reduced, canvas_mm=canvas_mm)
+        traced = backend.trace(reduced, canvas_mm=canvas_mm, overlap=overlap)
     except TracerError as exc:
         row.notes.append(f"paths: not traced — {exc}")
         return
@@ -350,6 +364,10 @@ def trace_row(
         )
         return
     row.fit = compare_rasters(reduced.raster(), shot).ratio
+    # Free, off the same render: what the layered document failed to paint at
+    # all. ``fit`` cannot separate that from a colour in the wrong place, and a
+    # seam is the failure a shop notices first — it is bare fabric.
+    row.gaps = show_through(shot).area
 
 
 def measure(
@@ -357,6 +375,7 @@ def measure(
     work_side: Optional[int] = None,
     backend: Optional[TracerBackend] = None,
     preprocess: bool = False,
+    overlap: int = DEFAULT_OVERLAP,
 ) -> Measurement:
     """Everything B1 can say about one image, plus what B0's tracer makes of it.
 
@@ -421,7 +440,7 @@ def measure(
         )
 
     if backend is not None:
-        trace_row(row, reduced, canvas_and_stroke(profile)[0], backend)
+        trace_row(row, reduced, canvas_and_stroke(profile)[0], backend, overlap=overlap)
 
     # B2 grades the row it is handed rather than measuring again, so ``svgemb
     # assess`` and ``svgemb bench`` cannot disagree about an image. Last, so the
@@ -481,6 +500,10 @@ class BenchRun:
     #: as the other two: it changes every number in the table, so a preprocessed
     #: run and a raw one answer different questions and must not be diffed.
     preprocess: bool = False
+    #: How far each colour was grown under the ones stitched after it (B4). One
+    #: more condition that moves ``paths``, ``nodes``, ``fit`` and ``gaps``
+    #: together, so it is recorded and diffed like the rest of them.
+    overlap: int = DEFAULT_OVERLAP
 
     @property
     def measured(self) -> List[Measurement]:
@@ -514,6 +537,7 @@ class BenchRun:
             "tracer": self.tracer,
             "tracer_version": self.tracer_version,
             "preprocess": self.preprocess,
+            "overlap": self.overlap,
             "averages": self.averages(),
             "rows": {row.name: row.to_dict() for row in self.rows},
         }
@@ -547,6 +571,7 @@ def run(
     corpus: str = "",
     backend: Optional[TracerBackend] = None,
     preprocess: bool = False,
+    overlap: int = DEFAULT_OVERLAP,
 ) -> BenchRun:
     """Measure every entry. ``backend=None`` means *do not trace*, not *pick one*.
 
@@ -556,7 +581,13 @@ def run(
     """
     return BenchRun(
         rows=[
-            measure(entry, work_side=work_side, backend=backend, preprocess=preprocess)
+            measure(
+                entry,
+                work_side=work_side,
+                backend=backend,
+                preprocess=preprocess,
+                overlap=overlap,
+            )
             for entry in entries
         ],
         work_side=work_side,
@@ -564,6 +595,7 @@ def run(
         tracer=backend.name if backend else "",
         tracer_version=backend.version() if backend else "",
         preprocess=preprocess,
+        overlap=overlap,
     )
 
 
@@ -634,6 +666,15 @@ def incomparable(baseline: Dict[str, Any], current: BenchRun) -> List[str]:
             f"{'after B3 cleaned it' if was else 'as handed in'}, this run "
             f"{'after B3 cleaned it' if now else 'as handed in'}"
         )
+    # Only worth saying when something was traced: with no tracer there are no
+    # layers to overlap, so the setting cannot have moved a number.
+    if current.tracer:
+        was, now = baseline.get("overlap", DEFAULT_OVERLAP), current.overlap
+        if was != now:
+            reasons.append(
+                f"seam overlap: baseline grew each layer {was}px under the next, "
+                f"this run {now}px"
+            )
     return reasons
 
 
@@ -781,6 +822,7 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
     )
     traced = (
         f"traced with {bench.tracer} {bench.tracer_version}".rstrip()
+        + f", layers grown {bench.overlap}px"
         if bench.tracer
         else "no tracer here"
     )
@@ -825,13 +867,21 @@ def compare_tracers(
     corpus: str = "",
     backends: Optional[Sequence[TracerBackend]] = None,
     preprocess: bool = False,
+    overlap: int = DEFAULT_OVERLAP,
 ) -> List[BenchRun]:
     """One full sweep per installed tracer — the instrument B0's decision rests on."""
     from .tracer import available_backends
 
     chosen = list(backends if backends is not None else available_backends())
     return [
-        run(entries, work_side=work_side, corpus=corpus, backend=backend, preprocess=preprocess)
+        run(
+            entries,
+            work_side=work_side,
+            corpus=corpus,
+            backend=backend,
+            preprocess=preprocess,
+            overlap=overlap,
+        )
         for backend in chosen
     ]
 
@@ -853,12 +903,15 @@ def render_tracer_comparison(runs: Sequence[BenchRun], color: bool = True) -> st
         return f"no tracer installed here, so there is nothing to compare — {TRACER_INSTALL_HINT}"
 
     lines = [
-        f"{'tracer':<16}{'images':>7}{'paths':>8}{'nodes':>8}{'fit':>8}{'seconds':>9}",
-        "─" * 56,
+        f"{'tracer':<16}{'images':>7}{'paths':>8}{'nodes':>8}{'fit':>8}{'gaps':>8}"
+        f"{'seconds':>9}",
+        "─" * 64,
     ]
     for bench in runs:
         fits = [row.fit for row in bench.measured if row.fit is not None]
         mean_fit = f"{sum(fits) / len(fits):.3f}" if fits else "·"
+        seams = [row.gaps for row in bench.measured if row.gaps is not None]
+        mean_gaps = f"{sum(seams) / len(seams):.3f}" if seams else "·"
         spent = sum(
             row.trace_seconds for row in bench.measured if row.trace_seconds is not None
         )
@@ -866,7 +919,7 @@ def render_tracer_comparison(runs: Sequence[BenchRun], color: bool = True) -> st
         lines.append(
             f"{label:<16}{len(bench.measured):>7}"
             f"{_totals(bench, 'paths') or 0:>8}{_totals(bench, 'nodes') or 0:>8}"
-            f"{mean_fit:>8}{spent:>9.2f}"
+            f"{mean_fit:>8}{mean_gaps:>8}{spent:>9.2f}"
         )
 
     names = [bench.tracer for bench in runs]

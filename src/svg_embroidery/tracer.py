@@ -1,10 +1,11 @@
-"""B0: turning a quantised bitmap into paths — by borrowing a tracer, not writing one.
+"""B0/B4: turning a quantised bitmap into paths — by borrowing a tracer, not writing one.
 
 Writing a tracer is a research project. Three usable ones already exist, so the
-roadmap's instruction for this step is *buy, don't build*: wrap each candidate in
-one interface, run them over the B1 corpus, and record which one wins and why.
-:mod:`svg_embroidery.bench` does the comparing; this module only makes the
-candidates comparable.
+roadmap's instruction for B0 is *buy, don't build*: wrap each candidate in one
+interface, run them over the B1 corpus, and record which one wins and why.
+:mod:`svg_embroidery.bench` does the comparing; this module makes the candidates
+comparable, and then (B4) assembles their output into a document a shop can
+stitch.
 
 The interface is deliberately narrow, and shaped by what Phase A already checks
 rather than by what the tracers offer:
@@ -15,6 +16,16 @@ largest area. Mask tracers give that naturally — they trace one colour at a ti
 — so the wrapper drives them once per palette entry and assembles the document
 itself. A colour tracer produces its own SVG and is taken as it comes; that
 difference is a finding, not a defect to paper over.
+
+**Each colour is grown under the ones stitched after it** (B4). Tracing colours
+separately means every shared border gets drawn twice, once from each side, and
+two smoothed curves through the same staircase do not coincide — so a butt joint
+leaves the page showing through in a hairline. :func:`trapped_claims` spreads
+every layer outwards into the pixels of layers stitched *later*, and only those,
+which is the printer's trap and the embroiderer's pull compensation in one: the
+gap is covered from underneath, and the upper colour's own outline still decides
+where the visible edge is. See :func:`layer_order` for what "later" means and
+why area rather than darkness settles it.
 
 **Millimetres on the outside, pixels on the inside.** The document carries
 ``width``/``height`` in mm from the profile and a ``viewBox`` in working pixels,
@@ -60,6 +71,17 @@ ALPHAMAX = 1.0
 #: ratio written into the document, never the geometry.
 DEFAULT_CANVAS_MM = 100.0
 
+#: How far each colour is grown under the ones stitched after it, in working
+#: pixels. See :func:`trapped_claims` for what it fixes.
+#:
+#: One pixel is both the least the grid can express and about the right physical
+#: size, and the second part is not luck — B1's ``scale_for`` picks the working
+#: resolution so that the profile's thinnest stitchable line spans three pixels.
+#: So one pixel is a third of the minimum feature whatever the shop's numbers
+#: are: 0.5 mm against a 1.5 mm needle, which is the range embroidery software
+#: calls pull compensation. The profile sets it without a knob to set.
+DEFAULT_OVERLAP = 1
+
 #: How long one image may take before the wrapper gives up on a subprocess.
 TIMEOUT_SECONDS = 60
 
@@ -100,7 +122,8 @@ class Layer:
     index: int
     color: RGB
     #: Fraction of the image this colour covers, so the document can be ordered
-    #: the way it will be stitched.
+    #: the way it will be stitched. The artwork's area — what the layer is
+    #: *for* — rather than what it was grown to for the sake of its neighbours.
     area: float
     #: One or more ``d`` attributes.
     data: List[str]
@@ -122,6 +145,136 @@ class Trace:
     #: Non-empty when the result is usable but something about it is worth
     #: knowing — a colour tracer's flat output, for instance.
     notes: List[str] = field(default_factory=list)
+    #: Working pixels each layer was grown under its successors (B4). Recorded
+    #: because it changes ``paths`` and ``nodes``, so two runs at different
+    #: overlaps are not comparable — the same reason the benchmark records which
+    #: tracer answered.
+    overlap: int = 0
+
+
+# ------------------------------------------------------- B4: stacking order
+
+
+def _lightness(color: RGB) -> float:
+    """CIE L* — "how light is this", as a person sees it rather than as RGB does."""
+    from .colors import srgb_to_lab
+
+    return srgb_to_lab(hex_color(color))[0]
+
+
+def layer_order(quantisation: Quantisation) -> List[int]:
+    """Which colour is stitched first, and so sits underneath the rest.
+
+    **Area decides, and darkness only breaks a tie.** The roadmap proposed
+    *darkest-last, so light backgrounds sit underneath*, which is a true
+    observation about the usual case and the wrong rule to write down: it is a
+    statement about a *colour*, and stacking is a question about *shape*. Give it
+    a design on a black background and darkest-last puts the background on top of
+    the artwork, which is not a seam bug but a blank picture.
+
+    Area is the proxy that cannot fail that way, because it is a fact about the
+    geometry: nothing can be surrounded by something smaller than itself, so the
+    enclosing colour is the larger one. Where two colours cover *exactly* the
+    same number of pixels there is no such fact to read, and only then does the
+    darker one go later — where the roadmap's instinct was right, and where it
+    costs nothing if it is wrong.
+
+    Ordering is a much smaller decision than it looks, and B4 is what made it
+    small: :func:`trapped_claims` grows a layer only into pixels that later
+    layers paint over, so every colour's *visible* edge is its own outline
+    whatever the order. What is left to choose is the order the machine stitches
+    in, which is what this is for.
+    """
+    counts = [0] * quantisation.colors
+    for value in quantisation.indices:
+        counts[value] += 1
+    light = [_lightness(color) for color in quantisation.palette]
+    # Largest first; on an exact tie the lighter one first, so the darker is
+    # stitched over it. The index is the last resort, so the order is stable.
+    return sorted(
+        range(quantisation.colors),
+        key=lambda index: (-counts[index], -light[index], index),
+    )
+
+
+def _dilate(claims: List[int], width: int, height: int) -> List[int]:
+    """Spread every bit one pixel in all eight directions.
+
+    Separable, because OR over a square is two OR passes over a line — four
+    list comprehensions instead of a nine-tap loop per pixel, which is the
+    difference between this being free and this doubling the benchmark.
+    """
+    if width < 1 or height < 1:
+        return list(claims)
+
+    left = [0] + claims[:-1]
+    right = claims[1:] + [0]
+    for y in range(height):  # a row's neighbour is not the end of the row above
+        left[y * width] = 0
+        right[(y + 1) * width - 1] = 0
+    row = [a | b | c for a, b, c in zip(claims, left, right)]
+
+    above = [0] * width + row[:-width]
+    below = row[width:] + [0] * width
+    return [a | b | c for a, b, c in zip(row, above, below)]
+
+
+def trapped_claims(
+    quantisation: Quantisation, order: Sequence[int], overlap: int = DEFAULT_OVERLAP
+) -> List[int]:
+    """Which layers cover each pixel, once every colour is spread under its successors.
+
+    Returns one integer per pixel, with bit *p* set when the layer at position
+    *p* of ``order`` covers it. Bit sets rather than a mask per layer because the
+    dilation is then one pass over the image however many colours there are.
+
+    **The problem.** Two colours that meet in the image are traced twice, once
+    from each side, and potrace smooths the shared staircase differently
+    depending on which side is the ink — so the two curves cross rather than
+    coincide. Everywhere they diverge, the document has no paint at all and the
+    page shows through in a hairline. Even where they *do* coincide the seam is
+    visible, because two shapes each covering half of a boundary pixel composite
+    to three-quarters of a pixel, not a whole one. Measured on the corpus before
+    this existed: 2–6% of pixels not fully covered, and on ``scan-clean`` some of
+    them at zero coverage — a real hole, not an artefact of antialiasing.
+
+    **The fix, and why it is not simply "grow everything".** Growing every mask
+    would thicken every shape by a pixel and let the *lower* colour decide the
+    visible edge, so the artwork would move. A layer is grown only into pixels
+    belonging to layers stitched **after** it, which are painted over afterwards
+    anyway. Three things follow, and they are the reason this shape was chosen:
+
+    - no gap can survive, since between any two layers the earlier one already
+      covers the later one's first pixel;
+    - nothing visible moves, since the later layer keeps its own outline and
+      paints it on top;
+    - and the topmost layer is not grown at all, because there is nothing above
+      it to hide the growth.
+
+    This is exactly the printer's trap — spread the underlying colour, choke
+    nothing — and it is what an embroidery digitiser does by hand as pull
+    compensation, because fabric moves under the needle and a butt joint opens
+    up on the first wash.
+    """
+    total = quantisation.width * quantisation.height
+    rank = [0] * quantisation.colors
+    for position, index in enumerate(order):
+        rank[index] = position
+
+    claims = [1 << rank[value] for value in quantisation.indices]
+    if overlap < 1 or total < 1:
+        return claims
+
+    # A pixel may be claimed by layers stitched before its own and by no others:
+    # those are the ones it is painted over by, so their growth cannot show.
+    allowed = [(1 << rank[value]) - 1 for value in quantisation.indices]
+    for _ in range(overlap):
+        spread = _dilate(claims, quantisation.width, quantisation.height)
+        claims = [
+            claim | (reach & permitted)
+            for claim, reach, permitted in zip(claims, spread, allowed)
+        ]
+    return claims
 
 
 # ---------------------------------------------------------------- backends
@@ -154,7 +307,12 @@ class Backend:
         """
         return ""
 
-    def trace(self, quantisation: Quantisation, canvas_mm: float = DEFAULT_CANVAS_MM) -> Trace:  # pragma: no cover
+    def trace(
+        self,
+        quantisation: Quantisation,
+        canvas_mm: float = DEFAULT_CANVAS_MM,
+        overlap: int = DEFAULT_OVERLAP,
+    ) -> Trace:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -174,19 +332,25 @@ class MaskBackend(Backend):
         """Path data for the True pixels, and any transform it needs."""
         raise NotImplementedError
 
-    def trace(self, quantisation: Quantisation, canvas_mm: float = DEFAULT_CANVAS_MM) -> Trace:
+    def trace(
+        self,
+        quantisation: Quantisation,
+        canvas_mm: float = DEFAULT_CANVAS_MM,
+        overlap: int = DEFAULT_OVERLAP,
+    ) -> Trace:
         if not self.available():
             raise TracerError(f"{self.name} is not available here — {self.install}")
         started = time.monotonic()
         layers: List[Layer] = []
-        order = sorted(
-            range(quantisation.colors), key=quantisation.area, reverse=True
-        )
-        for index in order:
+        order = layer_order(quantisation)
+        claims = trapped_claims(quantisation, order, overlap)
+        for position, index in enumerate(order):
             area = quantisation.area(index)
             if area <= 0:
                 continue
-            mask = [value == index for value in quantisation.indices]
+            # Everything this layer covers: its own pixels, plus the border it
+            # was spread into under the layers stitched after it.
+            mask = [bool(claim >> position & 1) for claim in claims]
             data, transform = self._trace_mask(
                 mask, quantisation.width, quantisation.height
             )
@@ -211,6 +375,7 @@ class MaskBackend(Backend):
             paths=paths,
             nodes=nodes,
             seconds=time.monotonic() - started,
+            overlap=overlap,
         )
 
 
@@ -352,7 +517,12 @@ class VtracerLibrary(Backend):
     def version(self) -> str:
         return _package_version("vtracer")
 
-    def trace(self, quantisation: Quantisation, canvas_mm: float = DEFAULT_CANVAS_MM) -> Trace:
+    def trace(
+        self,
+        quantisation: Quantisation,
+        canvas_mm: float = DEFAULT_CANVAS_MM,
+        overlap: int = DEFAULT_OVERLAP,
+    ) -> Trace:
         if not self.available():
             raise TracerError(f"{self.name} is not available here — {self.install}")
         import vtracer
@@ -378,6 +548,12 @@ class VtracerLibrary(Backend):
             notes.append(
                 f"chose its own {len(fills)} colours, ignoring the profile's "
                 f"{quantisation.colors}"
+            )
+        if overlap:
+            notes.append(
+                "traces colour directly, so it draws its own boundaries and the "
+                "seam overlap does not apply; whatever the 'gaps' column says "
+                "here is vtracer's own doing, not ours"
             )
         paths, nodes = measure_svg(svg)
         return Trace(

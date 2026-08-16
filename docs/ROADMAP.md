@@ -511,9 +511,13 @@ new min-feature check finds the defect in a purpose-built test file.
 
 > **Still open: narrow gaps.** The opening finds detail too thin; the closing
 > (grow, then shrink) finds *gaps* too narrow — two shapes that will bleed into
-> each other once they are stitched. Same backend, same shape of code, and B4
-> needs it anyway to stop neighbouring colour masks leaving hairline seams. It
-> is left there rather than done twice.
+> each other once they are stitched. Same backend, same shape of code, and this
+> was deferred to B4 on the assumption that its seam work would need the same
+> operation. ~~It is left there rather than done twice.~~ **It wasn't needed
+> there**: B4's seams are a pixel-grid problem, fixed by a pixel-grid dilation
+> that needs no backend and runs on a phone, while a gap check on arbitrary
+> artwork does need one. The two never shared code, so this is still unwritten
+> and it belongs here, next to the opening it mirrors.
 
 ### A6. Surfacing it · ✅ CLEARED
 
@@ -825,6 +829,7 @@ judgement on real scans. Real images can be dropped in alongside.
 | `paths` | subpaths in the traced SVG — shapes the machine has to fill (B0) | lower |
 | `nodes` | drawing commands in the traced SVG — where stitch count comes from (B0) | lower |
 | `fit` | share of pixels the traced SVG gets wrong against its source (B0) | lower |
+| `gaps` | share of the traced SVG with no paint on it at all — the seams between colour layers (B4) | lower |
 | `verdict` | triage's good/marginal/hopeless, next to `expect` (B2) | — |
 | `passes` | does the converted SVG pass its profile (B6) — declared, still empty | — |
 
@@ -837,7 +842,8 @@ resolution and the tracer both change every number in the table, so `svgemb
 bench` refuses the diff across either — with the reason, and with the tracer's
 *version*, since potrace 1.16 and potrace 1.10 need not agree on a curve. Same
 rule as the empty cell: a comparison that can't answer the question must not
-print an answer.
+print an answer. B3's preprocessing and B4's seam overlap joined the list as
+they landed, each for the same reason.
 
 **Two findings worth carrying forward.**
 
@@ -1114,7 +1120,132 @@ denoising.
 > carries no orientation, so shipping it here would have meant a stage no test
 > could exercise. It lands with the first real JPEG.
 
-### B4. Layered tracing · size M
+### B4. Layered tracing · ✅ CLEARED
+
+B0 had already built the easy half — one mask per colour, one `<g>` each, so
+`structure.color_layers` passes by construction rather than by repair. What was
+left was the half that decides whether the result is *stitchable*: the seams
+between those layers, and the order they go down in.
+
+**Gate met.** On the corpus's own three-colour logo, preprocessed and traced:
+three layers, and `svgemb check -p embroidery-basic` says
+`✅ PASS: 0 error(s), 0 warning(s), 13 check(s) passed`. The seams went from
+0.4% of the image bare to 0.00%, and across the whole corpus:
+
+| | butt joints | grown 1px |
+| --- | --- | --- |
+| `gaps`, mean over the corpus | 0.021 | **0.000** |
+| `gaps`, worst image (`hatching`) | 0.274 | **0.000** |
+| `fit`, mean | 0.074 | **0.073** |
+| paths / nodes | 2125 / 21405 | **1856 / 19827** |
+
+**The seam was real, and bigger than expected.** Tracing colours separately
+means every shared border is drawn twice, once from each side, and two smoothed
+curves through the same staircase do not coincide — so the document has no paint
+at all along a hairline. Even where the outlines *do* agree exactly the joint
+shows, because two shapes each covering half of a boundary pixel composite to
+three quarters of one. Measured before any of this existed: 2–6% of a typical
+image not fully covered, and on `scan-clean` pixels at **zero** coverage, which
+is an outright hole. On fabric that is not a rendering artefact, it is bare
+cloth between two blocks of stitching.
+
+**The fix is the printer's trap, and the shape of it is the whole idea.** Not
+"grow every mask" — that thickens every shape by a pixel and lets the *lower*
+colour decide where the visible edge is, so the artwork moves. Each layer is
+grown only into the pixels of layers stitched **after** it, which are painted
+over afterwards anyway. Three things follow, and they are why this shape was
+chosen over the obvious one:
+
+- no gap can survive, because between any two layers the earlier one already
+  covers the later one's first pixel;
+- nothing visible moves, because the later layer keeps its own outline and
+  paints it on top — verified by rendering with and without and checking that
+  every pixel that changed had been a gap;
+- the topmost layer is not grown at all, because there is nothing above it to
+  hide the growth under.
+
+It is also what an embroidery digitiser does by hand, for a reason no renderer
+can show you: fabric moves under the needle, and a butt joint opens up on the
+first wash.
+
+**One working pixel, and the profile picks it without a knob.** B1's
+`scale_for` already chooses the working resolution so the profile's thinnest
+stitchable line spans three pixels — so one pixel is a third of the minimum
+feature whatever the shop's numbers say: 0.5 mm against a 1.5 mm needle, which
+is the range embroidery software calls pull compensation. `--overlap N` exists
+because the measurement needs a way to turn the thing off, not because anyone
+should be tuning it.
+
+**Ordering: area decides, and darkness only breaks a tie.** The plan said
+*darkest-last, so light backgrounds sit underneath*, which is a true observation
+about the usual case and the wrong rule to write down — it is a claim about a
+*colour*, and stacking is a question about *shape*. Give it a design on a black
+background and darkest-last puts the background on top of the artwork: not a
+seam bug, a blank picture. Area is the proxy that cannot fail that way because
+it is a fact about the geometry — nothing can be surrounded by something smaller
+than itself. Where two colours cover *exactly* the same number of pixels there
+is no such fact to read, and only there does the darker one go later.
+
+The roadmap suggested the profile should settle this. It shouldn't: nothing in a
+profile expresses stitching order, no rule checks it, and adding a knob would
+have created a second source of truth about something the labels already answer.
+What made the decision small is the trap itself — since a layer is grown only
+under its successors, every colour's *visible* edge is its own outline whatever
+the order, so what is left to choose is the order the machine sews in.
+
+**What it costs, and the finding underneath.** Corpus-wide the overlap *saves*
+13% of the paths and 7% of the nodes, because dilating a mask fills in
+single-pixel notches the tracer would otherwise have to follow. But
+`logo-five-colour` goes the other way, 15 paths to 46, and the reason is worth
+more than the number: **the tracer had been silently deleting speckle, and the
+deletion was itself a source of gaps.** That image's bottom layer contains 60
+regions, 53 of them one or two pixels — five flat colours squeezed into three
+leaves islands — and potrace's `turdsize` was dropping every one of them,
+leaving a hole where each had been. Grown by a pixel they clear the threshold
+and get stitched.
+
+That is the honest outcome rather than a regression: the document now says what
+the labels say. And the checker can now see it — traced with butt joints,
+`logo-five-colour` *passes* `geometry.min_feature_size` under
+`embroidery-strict`; traced with the seams closed it fails, reporting 2% of the
+path's area as finer than 1.5 mm. A5's check was being fed a file with the
+evidence already removed. **Deleting detail too fine to stitch is B5's job, done
+deliberately and reported** — not a tracer default nobody chose.
+
+The same effect is the whole of the `fit` cost, which is otherwise nil: on
+`monogram` and `line-art-thick` the overlap costs 0.004 and 0.002, and both are
+paying for a palette entry of 56 and 460 pixels — an antialias remnant, not a
+thread. Quantise those images to two colours instead of three and the overlap is
+free to three decimal places (0.0074 → 0.0075) while still closing every gap.
+
+**New column: `gaps`**, filled from the render `fit` was already doing, so it
+costs nothing. It is the share of the traced document that has no paint on it,
+and it needs no second render and no threshold: a renderer writes alpha below
+255 exactly where nothing covered the pixel. `fit` cannot distinguish that from
+a colour in the wrong place, and they are not the same news — one is a wrong
+thread, the other is no thread. A one-pixel frame is excluded, because the
+outermost row of any correct document is half-covered by the edge of the
+artwork, and counting it would put a floor under the metric that no fix could
+reach.
+
+**Not zero, and the residue is a real thing rather than a tolerance.** Three
+layers meeting at a point leave a few pixels a fraction short — the layer that
+should cover the junction is doing it with a one-pixel spur, and a tracer
+smooths those away. Six pixels on the test logo, none of them below 94%
+coverage, 0.01% of the image. A second pixel of overlap closes it completely and
+costs a millimetre of extra stitching over every border in the design to do so,
+which is the wrong trade.
+
+**vtracer is left alone**, and now says so on the run: it traces colour directly,
+so it draws its own boundaries and no overlap of ours applies — whatever its
+`gaps` cell says is its own doing. For the record it scores 0.000 there too, by
+stacking whole shapes rather than tiling them. Regrouping its flat output by
+fill would make it *look* profile-shaped while it still ignores the colour
+budget, which is a worse kind of wrong than being honestly unsuitable. It is not
+the default and B0 explained why.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Split the quantised image into one binary mask per colour and trace each
 separately. This is the elegant part: **the "one colour per layer" requirement
@@ -1140,6 +1271,22 @@ the ordering rule stated above, which is *darkest-last* where B0 used
 settle it. Note also that vtracer, being a colour tracer, produces none of this:
 its flat output is reported as a note on the run rather than quietly restructured.
 
+</details>
+
+> **A wart the step exposed, and fixed.** Adding a column bumps the baseline
+> format, and a stale baseline printed *"re-record it with `svgemb bench
+> --save`"* — then refused to run `--save` until the baseline was readable,
+> which is exactly when it is not. Advice a command prints has to be advice that
+> command will take.
+
+> **Still open: `geometry.min_gap`.** A5 deferred the narrow-gap check here on
+> the grounds that B4 would need the same closing operation for its seams. It
+> turned out not to: seams are a pixel-grid problem and the fix is a pixel-grid
+> dilation, pure Python and available on a phone, where a gap *check* on
+> arbitrary artwork needs the geometry backend. So the two do not share code
+> after all, and the check is still unwritten — it belongs with A5's opening,
+> not here.
+
 ### B5. Vector cleanup · size M
 
 Reuse Phase A's machinery on the tracer's raw output:
@@ -1149,6 +1296,18 @@ Reuse Phase A's machinery on the tracer's raw output:
 - close all subpaths, set canvas size in cm, assemble the layer structure
 
 **Done when:** the tracer's output passes the target profile after cleanup.
+
+**What B4 hands it, and why the second item moved up the list.** The layer
+structure is assembled and the canvas is already in millimetres from the
+profile, so that third line is done. The second one is now the interesting one:
+closing the seams stopped potrace's `turdsize` from quietly deleting speckle, so
+`logo-five-colour` traces 46 subpaths where it traced 15, and
+`geometry.min_feature_size` reports 2% of a path as unstitchable where it
+previously reported nothing. The detail was always there — the tracer was
+removing the evidence along with it, and leaving a hole in its place. B5 is
+where it gets removed on purpose, by a rule the profile names, with the removal
+reported. A4's fixers and A5's `min_feature_size` repair are most of the
+machinery.
 
 ### B6. Close the loop · size M
 
@@ -1190,7 +1349,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
-   ✅ CLEARED       │      ✅ CLEARED
+   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
@@ -1202,15 +1361,19 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B0, B1, B2 and B3 are done — the phase's real work is
-behind it. A scan now converts: `scan-clean` goes from `fit` 0.253 to 0.032, and
-the whole corpus needs a third of the paths it did. **B4 is next**, and B0 left
-it half-built — the per-colour masks and one `<g>` each already exist and are
-tested, so what B4 owes is the seam work and the ordering rule.
+**Where Phase B stands:** B0 through B4 are done, and what they add up to is a
+pipeline: a scan goes in and a layered, seam-free SVG comes out that
+`svgemb check` passes. `scan-clean` went from `fit` 0.253 to 0.032, the corpus
+needs a third of the paths it did, and no image in it traces with a gap in it
+any more. **B5 is next**, and B4 sharpened what it is for: the trace now
+faithfully reproduces one- and two-pixel islands the tracer used to delete
+behind everyone's back, `geometry.min_feature_size` can finally see them, and
+dropping them is a decision that should be made and reported rather than
+inherited from a tracer's default.
 
-The corpus is also now asking for two things nobody planned: a **deskew** stage
-(the only triage miss left is `scan-skewed`, and nothing measures rotation) and
-**EXIF orientation** (deferred out of B3, see there).
+The corpus is also still asking for two things nobody planned: a **deskew**
+stage (the only triage miss left is `scan-skewed`, and nothing measures
+rotation) and **EXIF orientation** (deferred out of B3, see there).
 
 ## Risks, named up front
 

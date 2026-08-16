@@ -295,6 +295,107 @@ def compare_rasters(
     )
 
 
+# ---------------------------------------------------------- show-through
+
+
+@dataclass(frozen=True)
+class ShowThrough:
+    """How much of a rendered document has no paint on it at all."""
+
+    #: Pixels the artwork does not fully cover.
+    pixels: int
+    total_pixels: int
+    #: Those pixels added up by how much each is missing, in whole pixels. A
+    #: pixel at three-quarters coverage contributes 0.25.
+    missing: float
+    #: The least-covered pixel, 0-255. 255 means nothing showed through at all,
+    #: and anything near 0 is an outright hole rather than a soft edge.
+    worst: int
+
+    @property
+    def ratio(self) -> float:
+        """Share of the image touched by a gap, however faintly."""
+        return self.pixels / self.total_pixels if self.total_pixels else 0.0
+
+    @property
+    def area(self) -> float:
+        """Share of the image genuinely unpainted — the headline number.
+
+        The one to grade a seam on: :attr:`ratio` counts a pixel that is 99%
+        covered the same as a hole, which flatters nothing but exaggerates
+        everything.
+        """
+        return self.missing / self.total_pixels if self.total_pixels else 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pixels": self.pixels,
+            "total_pixels": self.total_pixels,
+            "ratio": self.ratio,
+            "area": self.area,
+            "worst": self.worst,
+            "text": str(self),
+        }
+
+    def __str__(self) -> str:
+        if not self.pixels:
+            return "nothing shows through"
+        return (
+            f"{self.pixels}/{self.total_pixels} pixels not fully covered "
+            f"({self.area:.2%} of the image missing, worst alpha {self.worst})"
+        )
+
+
+def show_through(raster: Raster, margin: int = 1) -> ShowThrough:
+    """Measure where a rendering has no paint on it — B4's seam instrument.
+
+    Two shapes drawn edge to edge do not join. Even when their outlines agree to
+    the last decimal, each covers half of the boundary pixel and the two halves
+    composite to three-quarters, so a hairline of page shows between them; where
+    the outlines *disagree*, which is what separately-traced colour masks always
+    do, the hairline is a real gap. Both land in the same place: the renderer
+    writes an alpha below 255, and that is the whole measurement. No second
+    render against a contrasting background, no threshold, no guessing which
+    colour a pixel should have been.
+
+    It is only a seam measurement for a document that is *supposed* to cover its
+    canvas, which a trace of a quantised image is by construction — every pixel
+    of the source carries a label, so every pixel of the output belongs to some
+    layer. Point it at ordinary artwork and it will faithfully report the empty
+    space around the design.
+
+    ``margin`` drops a frame that many pixels wide, because the outermost row of
+    the canvas is half-covered by the edge of the artwork in every correctly
+    drawn document. That is the edge of the page, not a seam, and counting it
+    would put a floor under the metric that no fix could ever reach.
+    """
+    width, height = raster.width, raster.height
+    inner_width = width - 2 * margin
+    inner_height = height - 2 * margin
+    if inner_width < 1 or inner_height < 1:  # too small to have an inside
+        return ShowThrough(pixels=0, total_pixels=0, missing=0.0, worst=255)
+
+    pixels = raster.pixels
+    count = 0
+    missing = 0
+    worst = 255
+    for y in range(margin, height - margin):
+        row = y * width
+        for index in range((row + margin) * 4 + 3, (row + width - margin) * 4 + 3, 4):
+            alpha = pixels[index]
+            if alpha < 255:
+                count += 1
+                missing += 255 - alpha
+                if alpha < worst:
+                    worst = alpha
+    return ShowThrough(
+        pixels=count,
+        total_pixels=inner_width * inner_height,
+        missing=missing / 255.0,
+        worst=worst,
+    )
+
+
 # ------------------------------------------------------------- renderers
 
 

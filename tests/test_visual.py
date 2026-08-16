@@ -16,6 +16,7 @@ from svg_embroidery.visual import (
     decode_png,
     default_renderer,
     render,
+    show_through,
     visual_difference,
 )
 
@@ -157,6 +158,75 @@ def test_size_mismatch_is_a_total_difference():
 def test_difference_reads_well():
     assert str(Difference(0, 100, 0, 0.0)) == "images identical"
     assert "10.00%" in str(Difference(10, 100, 255, 1.0))
+
+
+# -- show-through, B4's seam instrument ------------------------------------
+
+def solid(width, height, alpha_rows):
+    """A raster from per-pixel alpha values; the colour never matters here."""
+    pixels = bytearray()
+    for row in alpha_rows:
+        for alpha in row:
+            pixels += bytes((200, 0, 0, alpha))
+    return Raster(width, height, bytes(pixels))
+
+
+def test_a_fully_painted_image_shows_nothing_through():
+    result = show_through(solid(3, 3, [[255] * 3] * 3))
+    assert result.pixels == 0
+    assert result.area == 0.0
+    assert result.worst == 255
+    assert str(result) == "nothing shows through"
+
+
+def test_a_hole_is_measured_by_how_much_is_missing_not_by_how_many_pixels():
+    """A pixel at 99% coverage is not the same news as a pixel at 0%."""
+    faint = show_through(solid(3, 3, [[255] * 3, [255, 128, 255], [255] * 3]))
+    hole = show_through(solid(3, 3, [[255] * 3, [255, 0, 255], [255] * 3]))
+    # One pixel each, either way — which is exactly why `ratio` is not the
+    # number B4 is graded on.
+    assert faint.ratio == hole.ratio == 1.0
+    assert faint.area == pytest.approx(127 / 255)
+    assert hole.area == 1.0
+    assert (faint.worst, hole.worst) == (128, 0)
+
+
+def test_the_edge_of_the_page_is_not_a_seam():
+    """Every correctly drawn document half-covers its outermost pixels.
+
+    Counting those would put a floor under the metric that no fix could reach,
+    so the frame is dropped — and the inside is then measured against its own
+    size, not the whole canvas.
+    """
+    edge_only = solid(3, 3, [[0, 0, 0], [0, 255, 0], [0, 0, 0]])
+    assert show_through(edge_only).pixels == 0
+    assert show_through(edge_only).total_pixels == 1
+    assert show_through(edge_only, margin=0).ratio == pytest.approx(8 / 9)
+
+
+def test_an_image_too_small_to_have_an_inside_reports_nothing():
+    assert show_through(solid(1, 1, [[0]])).total_pixels == 0
+    assert show_through(solid(1, 1, [[0]])).area == 0.0
+
+
+@needs_renderer
+def test_two_shapes_drawn_edge_to_edge_leave_a_seam():
+    """The defect B4 exists to close, in three lines of SVG.
+
+    Both rectangles are exact and they share an edge exactly — and it still
+    shows, because each covers half of the boundary pixel and two halves
+    composite to three quarters.
+    """
+    butted = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" '
+        'viewBox="0 0 40 40">'
+        '<rect x="0" y="0" width="19.5" height="40" fill="#c8102e"/>'
+        '<rect x="19.5" y="0" width="20.5" height="40" fill="#1a1a1a"/></svg>'
+    )
+    trapped = butted.replace('width="19.5"', 'width="21"')  # spread the lower one
+
+    assert show_through(render(butted, width=40)).area > 0.0
+    assert show_through(render(trapped, width=40)).area == 0.0
 
 
 # -- with a real renderer --------------------------------------------------

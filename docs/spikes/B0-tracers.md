@@ -145,7 +145,10 @@ predict what conversion will cost.
   elements with no colour groups, and it picks its own colours regardless of the
   profile's budget. Both are reported as notes on the run rather than silently
   fixed. If it is ever wanted as more than an option, B4 would have to regroup
-  its output by fill.
+  its output by fill. *(B4 declined: regrouping would make the output look
+  profile-shaped while it still ignores the colour budget, which is a worse kind
+  of wrong than being honestly unsuitable. It gained a third note instead — it
+  draws its own colour boundaries, so B4's seam overlap does not apply to it.)*
 - **`passes` is still empty**, and deliberately so: whether a traced document
   survives its own profile is B6's question, because the interesting part is the
   *retry* — lower `k`, simplify harder — not the single check. Worth recording
@@ -157,4 +160,7 @@ predict what conversion will cost.
 - **The mask backends already produce the layered structure Phase A wants**:
   one group per colour, largest area first, `fill` on the group. That was not
   free — it is what the wrapper does instead of the tracer — but it means B4
-  starts from a document that `structure.color_layers` already accepts.
+  starts from a document that `structure.color_layers` already accepts. *(What
+  it did not produce was a document without hairline gaps between those groups:
+  2% of a typical image, 27% of `hatching`. That is what B4 turned out to be
+  about — see the roadmap.)*

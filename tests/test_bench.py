@@ -228,6 +228,27 @@ def test_the_corpus_records_the_gap_b3_closed(corpus_rows):
     assert rows["scan-clean"].thin > 0.5
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+@pytest.mark.skipif(default_renderer() is None, reason="no renderer installed here")
+def test_nothing_in_the_corpus_traces_with_a_seam_in_it():
+    """B4's gate, at corpus scale rather than on one fixture.
+
+    Butt joints leave 2% of the average image bare and a quarter of `hatching`
+    — which is bare *fabric* once it is stitched, the failure a shop notices
+    before any of the others.
+    """
+    entries = load_corpus()
+    backend = default_backend()
+    butted = {row.name: row.gaps for row in run(entries, backend=backend, overlap=0).rows}
+    trapped = {row.name: row.gaps for row in run(entries, backend=backend, overlap=1).rows}
+
+    assert max(butted.values()) > 0.2  # hatching, a quarter of it
+    for name, before in butted.items():
+        assert trapped[name] <= before, name
+        assert trapped[name] < 0.0005, f"{name}: {trapped[name]}"
+
+
 # -- the baseline diff, which is the actual deliverable ----------------------
 
 def small_run(tmp_path, color):
@@ -284,6 +305,42 @@ def test_a_baseline_from_another_build_refuses_to_be_compared(tmp_path):
         load_baseline(path)
     with pytest.raises(BenchError, match="no baseline"):
         load_baseline(tmp_path / "absent.json")
+
+
+def test_an_unreadable_baseline_can_still_be_re_recorded(tmp_path, capsys):
+    """The advice a stale baseline prints has to be advice that works.
+
+    'Re-record it with --save' is a dead end if --save refuses to run until the
+    baseline is readable — which is precisely when it isn't.
+    """
+    directory = tiny_corpus(tmp_path / "c", {"a": image(32, 32, lambda x, y: RED)})
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"version": 99, "rows": {}}), encoding="utf-8")
+
+    argv = ["bench", "--corpus", str(directory), "--baseline", str(path)]
+    assert main(argv) == 2
+    assert "re-record" in capsys.readouterr().err
+
+    assert main(argv + ["--save"]) == 0
+    out = capsys.readouterr()
+    assert "not compared against the baseline" in out.out
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] != 99
+
+
+def test_a_stale_baseline_and_only_together_do_not_crash(tmp_path, capsys):
+    """--only filters the change list, and there is no change list to filter."""
+    directory = tiny_corpus(tmp_path / "c", {"a": image(32, 32, lambda x, y: RED)})
+    path = tmp_path / "baseline.json"
+    main(["bench", "--corpus", str(directory), "--baseline", str(path), "--save"])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["work_side"] = 64  # any condition that blocks the diff
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main([
+        "bench", "--corpus", str(directory), "--baseline", str(path), "--only", "a",
+    ]) == 0
+    assert "not compared" in capsys.readouterr().out
 
 
 def test_every_metric_declares_which_way_is_up():
@@ -469,3 +526,62 @@ def test_a_traced_row_fills_in_the_columns_that_describe_the_svg(tmp_path):
     assert row.nodes and row.nodes >= row.paths
     if default_renderer() is not None:
         assert row.fit is not None and row.fit < 0.05
+
+
+# -- the seam column (B4) ----------------------------------------------------
+
+def two_colour_corpus(tmp_path):
+    """A red disc on black.
+
+    A *disc* on purpose: an axis-aligned rectangle is the one shape whose butt
+    joint does not show, because both sides land on whole pixels and the
+    renderer has nothing to blend. Every real boundary is a staircase, and that
+    is where the hairline lives.
+    """
+    return tiny_corpus(
+        tmp_path / "c",
+        {
+            "a": image(
+                64, 64,
+                lambda x, y: RED if (x - 32) ** 2 + (y - 32) ** 2 < 400 else BLACK,
+            )
+        },
+    )
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+@pytest.mark.skipif(default_renderer() is None, reason="no renderer installed here")
+def test_the_gaps_column_shows_the_seams_closing(tmp_path):
+    """The column exists to make B4 arguable rather than asserted."""
+    entries = load_corpus(two_colour_corpus(tmp_path))
+    backend = default_backend()
+    butted = run(entries, backend=backend, overlap=0).rows[0]
+    trapped = run(entries, backend=backend, overlap=1).rows[0]
+    assert butted.gaps > trapped.gaps
+    assert trapped.gaps < 0.0005
+
+
+def test_a_run_records_the_overlap_it_was_taken_at(tmp_path):
+    result = run(load_corpus(two_colour_corpus(tmp_path)), overlap=2)
+    assert result.to_dict()["overlap"] == 2
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+def test_a_baseline_taken_at_another_overlap_is_not_diffed(tmp_path):
+    """One more condition that moves paths, nodes and fit together."""
+    result = run(load_corpus(two_colour_corpus(tmp_path)), backend=default_backend())
+    reasons = incomparable(dict(result.to_dict(), overlap=0), result)
+    assert reasons and "overlap" in reasons[0]
+    assert incomparable(result.to_dict(), result) == []
+
+
+def test_the_overlap_is_only_a_condition_when_something_was_traced(tmp_path):
+    """With no tracer there are no layers to overlap, so it cannot have moved a cell."""
+    result = run(load_corpus(two_colour_corpus(tmp_path)))
+    assert incomparable(dict(result.to_dict(), overlap=7), result) == []
+
+
+def test_a_negative_overlap_is_a_usage_error(tmp_path, capsys):
+    directory = tiny_corpus(tmp_path / "c", {"a": image(32, 32, lambda x, y: RED)})
+    assert main(["bench", "--corpus", str(directory), "--overlap", "-1"]) == 2
+    assert "cannot be negative" in capsys.readouterr().err

@@ -69,6 +69,7 @@ svgemb rules                                   # list all checks and their param
 svgemb bench                                   # measure the image corpus (B1)
 svgemb bench --preprocess                      # the same, after B3 cleans each image
 svgemb bench --tracers                         # compare every installed tracer (B0)
+svgemb bench --overlap 0                       # trace butt joints, to see the seams (B4)
 
 svgemb serve                                   # local web UI on http://localhost:8000
 svgemb roundtrip design.svg                    # verify read/write changes nothing
@@ -609,6 +610,52 @@ Costs, stated rather than buried: `hatching` (0.571 → 0.744) and
 `photo-landscape` (0.005 → 0.087) trace *worse*. Both are hopeless either way,
 and a tracer's fidelity to an image nobody can stitch is not worth optimising.
 
+**B4 — layered tracing, and the seams between the layers.** One mask per colour
+gives the layer structure for free; what it does not give is a join. Every
+shared border is traced twice, once from each side, and two smoothed curves
+through the same staircase do not coincide — so the document has no paint along
+a hairline. Even where the outlines agree exactly the joint shows, because two
+shapes each covering half a pixel composite to three quarters of one. On fabric
+that is bare cloth between two blocks of stitching.
+
+```bash
+svgemb bench --preprocess               # the gaps column, with the fix on
+svgemb bench --preprocess --overlap 0   # ...and with butt joints, to see it
+```
+
+| | butt joints | grown 1px |
+| --- | --- | --- |
+| `gaps`, mean over the corpus | 0.021 | **0.000** |
+| `gaps`, worst image (`hatching`) | 0.274 | **0.000** |
+| `fit`, mean | 0.074 | **0.073** |
+| paths / nodes | 2125 / 21405 | **1856 / 19827** |
+
+The fix is the printer's trap: each layer is grown **only into the pixels of
+layers stitched after it**, which get painted over anyway. Not "grow
+everything" — that thickens every shape and lets the lower colour decide the
+visible edge, so the artwork moves. This way no gap can survive, nothing visible
+moves, and the topmost layer is not grown at all. It is also what a digitiser
+does by hand, because fabric shifts under the needle and a butt joint opens up
+on the first wash. One working pixel is a third of the profile's minimum
+feature by construction — around 0.5 mm for a 1.5 mm needle, which is the usual
+pull compensation — so the profile sizes it without a knob.
+
+**Ordering: area decides, darkness only breaks a tie.** "Darkest last, so light
+backgrounds sit underneath" is true of the usual case and wrong as a rule — it
+is a claim about a colour, and stacking is a question about shape. On a dark
+background it puts the background on top of the artwork. Area cannot fail that
+way, because nothing can be surrounded by something smaller than itself.
+
+The finding worth carrying: corpus-wide the overlap *saves* 13% of the paths,
+but `logo-five-colour` goes from 15 to 46 — because **the tracer had been
+silently deleting speckle, and the deletion was itself making holes**. That
+image's bottom layer has 60 regions, 53 of them one or two pixels, and potrace's
+`turdsize` dropped every one. Grown by a pixel they survive and get stitched, so
+`geometry.min_feature_size` now reports 2% of a path as unstitchable where it
+previously reported nothing at all. Removing detail too fine for the needle is a
+decision that should be made and reported — that is B5 — not inherited from a
+tracer's default.
+
 The last empty column, "does it pass", waits for B6.
 
 ### Optional capabilities
@@ -631,10 +678,10 @@ harness already carries doubles as the corpus reader, so `svgemb bench` works on
 a bare install. Pillow adds every other image format; without it a JPEG is a row
 you don't get, with the reason printed, and the sweep continues.
 
-Tracing degrades the same way: with no tracer the `paths`, `nodes` and `fit`
-columns are empty and every other column still fills. And because the tracer
-changes every one of those numbers, a run traced with a different tracer — or a
-different *version* of the same one — is not diffed against the baseline at all.
+Tracing degrades the same way: with no tracer the `paths`, `nodes`, `fit` and
+`gaps` columns are empty and every other column still fills. And because the
+tracer changes every one of those numbers, a run traced with a different tracer —
+or a different *version* of the same one — is not diffed against the baseline at all.
 It says which conditions differ and offers to re-record, rather than printing a
 comparison that grades the tracer and looks like it grades the code.
 
@@ -645,9 +692,11 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## What is *not* checked
 
 - **Minimum gap size** — the other half of `geometry.min_feature_size`: two
-  shapes close enough to bleed into each other once stitched. Same machinery
-  (a closing rather than an opening); it lands with the tracer, which needs it
-  to keep neighbouring colours from leaving seams.
+  shapes close enough to bleed into each other once stitched. Same machinery,
+  a closing rather than an opening. It was expected to arrive with the tracer,
+  on the grounds that layered tracing needed it for its seams; it didn't — those
+  turned out to be a pixel-grid problem with a pixel-grid fix — so this is still
+  waiting, next to the opening it mirrors.
 - **Overlapping shapes / stitch order** — out of scope for a static checker.
 - **`<use>` clones** are flagged (via `element.forbidden`) rather than expanded.
 - Colours behind `url(#…)` references count as "not a flat colour"; the gradient

@@ -1,4 +1,8 @@
-"""Rules about the file itself and the canvas geometry."""
+"""Rules about the file itself and the canvas geometry.
+
+The measurements that need real path maths live in
+:mod:`svg_embroidery.geometry`; this module only asks it questions.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ from typing import Iterable, List
 
 from ..document import SvgDocument
 from ..findings import Finding, Severity
-from ..units import cm_to_mm, format_cm
+from ..units import cm_to_mm, format_cm, format_mm
 from .base import Rule, RuleConfigError, register
 
 
@@ -128,6 +132,154 @@ class AspectRatioRule(Rule):
                 )
             ]
         return [self.ok(f"Aspect ratio OK: {ratio:.2f}:1.")]
+
+
+#: Shapes whose outline we cannot know without a font or a resolved reference.
+UNMEASURABLE_TAGS = ("text", "image", "use")
+
+
+@register
+class MinFeatureSizeRule(Rule):
+    """A5: detail a needle cannot render, found by measuring rather than guessing.
+
+    A shape is stitchable where a disc the width of the finest stitch fits
+    inside it. Shrinking the shape by half that width and growing it back —
+    a morphological opening — leaves exactly the part that passes, so whatever
+    disappears is the part that would not survive.
+
+    Two ways to fail, reported differently because they mean different things:
+    a shape that vanishes entirely is a hairline nobody can stitch, while a
+    shape that loses a fraction of itself has a spike or a waist on an
+    otherwise fine body.
+
+    Sharp corners lose a sliver to this test no matter how solid the shape is
+    (a disc cannot reach into a corner), so :func:`geometry.corner_allowance`
+    works out what the corners were always going to cost and only the rest
+    counts against ``tolerance``. Without that, every small rectangle would be
+    reported.
+
+    Needs the geometry backend. Without it the rule measures nothing and says
+    so, rather than failing the file or the run — a verdict must not depend on
+    what happens to be installed.
+    """
+
+    id = "geometry.min_feature_size"
+    summary = "Filled shapes must have no detail too fine to stitch"
+    params = {"min_mm": 1.5, "tolerance": 0.01}
+
+    def validate(self) -> None:
+        if float(self.config["min_mm"]) <= 0:
+            raise RuleConfigError(f"rule '{self.id}': min_mm must be positive")
+        if not 0 <= float(self.config["tolerance"]) < 1:
+            raise RuleConfigError(f"rule '{self.id}': tolerance must be between 0 and 1")
+
+    def check(self, doc: SvgDocument) -> Iterable[Finding]:
+        from ..geometry import (
+            GeometryError,
+            INSTALL_HINT,
+            default_backend,
+            measure_thinness,
+            node_contours_mm,
+        )
+
+        backend = default_backend()
+        if backend is None:
+            return [
+                self.ok(
+                    "Minimum feature size was not measured — this machine has no path "
+                    f"geometry backend. To measure it, {INSTALL_HINT}.",
+                    measured=False,
+                )
+            ]
+
+        minimum = float(self.config["min_mm"])
+        tolerance = float(self.config["tolerance"])
+        scale = doc.unit_scale
+        findings: List[Finding] = []
+        checked = 0
+        unmeasured = 0
+
+        for node in doc.drawables:
+            if node.paint("fill") is None and node.paint_reference("fill") is None:
+                continue  # nothing is painted inside the outline; nothing to thin
+            contours = node_contours_mm(node, scale)
+            if not contours:
+                if node.tag in UNMEASURABLE_TAGS:
+                    unmeasured += 1
+                continue
+
+            # A stroke paints outside the fill, so a hairline path carrying a
+            # fat stroke is not a thin feature. Measure what ends up on the
+            # fabric, not what the fill alone covers.
+            stroke_mm = node.stroke_width_mm(scale) or 0.0
+            try:
+                thinness = measure_thinness(
+                    contours,
+                    minimum,
+                    backend=backend,
+                    stroke_width=stroke_mm,
+                    cap=node.style.get("stroke-linecap", "butt"),
+                    join=node.style.get("stroke-linejoin", "miter"),
+                )
+            except GeometryError as exc:
+                findings.append(
+                    self.warn(f"{node.label} could not be measured: {exc}", location=node.location)
+                )
+                continue
+            if thinness is None:
+                continue
+            checked += 1
+
+            if thinness.vanishes:
+                findings.append(
+                    self.fail(
+                        f"{node.label} is finer than {format_mm(minimum)} throughout — none of "
+                        "it would survive stitching.",
+                        hint="Thicken the shape, or drop it from the design.",
+                        location=node.location,
+                        min_mm=minimum,
+                        area_mm2=round(thinness.area, 3),
+                    )
+                )
+            elif thinness.excess_ratio > tolerance:
+                findings.append(
+                    self.fail(
+                        f"{node.label} has detail finer than {format_mm(minimum)} "
+                        f"({thinness.excess_ratio:.0%} of its area).",
+                        hint="Thicken the thin parts; a needle cannot render a line narrower "
+                        "than the stitch it makes.",
+                        location=node.location,
+                        min_mm=minimum,
+                        excess_ratio=round(thinness.excess_ratio, 4),
+                        area_mm2=round(thinness.area, 3),
+                    )
+                )
+
+        if doc.width_mm is None:
+            findings.append(
+                self.warn(
+                    "Physical document size is unknown, so feature sizes were measured with "
+                    "the CSS default of 96 px per inch.",
+                )
+            )
+        if unmeasured:
+            findings.append(
+                self.warn(
+                    f"{unmeasured} element(s) have no outline to measure "
+                    f"({', '.join(UNMEASURABLE_TAGS)}).",
+                )
+            )
+        if not findings:
+            if checked == 0:
+                return [self.ok("No filled shapes — nothing to measure.")]
+            return [
+                self.ok(
+                    f"All {checked} filled shape(s) are at least {format_mm(minimum)} thick "
+                    f"(measured with {backend.name}).",
+                    measured=True,
+                )
+            ]
+        return findings
 
 
 @register

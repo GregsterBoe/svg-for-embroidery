@@ -83,14 +83,28 @@ def is_unrendered(
 def remove_elements(
     root: ElementTree.Element, elements: Sequence[ElementTree.Element]
 ) -> int:
-    """Detach elements from their parents. Returns how many were removed."""
+    """Detach elements from their parents. Returns how many were removed.
+
+    The whitespace *after* the element is handed to whatever now comes before
+    it. Without that, deleting the last child of a group leaves the previous
+    sibling's indentation in front of the closing tag and the file comes back
+    looking mangled in the diff — the same reason the writer cuts attributes
+    out of a tag instead of reflowing it.
+    """
     parents = parent_map(root)
     removed = 0
     for element in elements:
         parent = parents.get(id(element))
-        if parent is not None:
-            parent.remove(element)
-            removed += 1
+        if parent is None:
+            continue
+        if element.tail is not None:
+            position = list(parent).index(element)
+            if position > 0:
+                parent[position - 1].tail = element.tail
+            else:
+                parent.text = element.tail
+        parent.remove(element)
+        removed += 1
     return removed
 
 

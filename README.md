@@ -154,8 +154,8 @@ is a commented template to copy.
 | Profile | For |
 | --- | --- |
 | `embroidery-basic` | The common denominator: 10–38 cm, ≤3 colours one per layer, no gradients, text as paths, closed contours, ≥1.5 mm strokes |
-| `embroidery-strict` | Small/cheap stitching: 8–30 cm, ≤2 colours, no strokes at all, ≤60 shapes |
-| `plotter-vinyl` | Cutting plotters: exactly 1 colour, closed contours, filled shapes only |
+| `embroidery-strict` | Small/cheap stitching: 8–30 cm, ≤2 colours, no strokes at all, ≤60 shapes, no detail finer than 1.5 mm |
+| `plotter-vinyl` | Cutting plotters: exactly 1 colour, closed contours, filled shapes only, no detail finer than 1 mm |
 | `example-shop` | Commented template showing palette restriction and severity overrides |
 
 ## Available checks
@@ -178,6 +178,7 @@ is a commented template to copy.
 | `document.no_editor_metadata` | No leftover editor state (it can carry your file name) |
 | `path.closed` | Every path *and subpath* ends with `Z` |
 | `path.max_count` | Design doesn't exceed N shapes |
+| `geometry.min_feature_size` | No filled detail finer than N mm (needs the geometry extra) |
 | `stroke.min_width` | Effective stroke width ≥ N mm |
 | `stroke.forbidden` | Filled shapes only, no strokes |
 | `fill.required` | Every visible shape has a fill |
@@ -264,6 +265,29 @@ Every colour substitution is reported, so you can disagree with it. Note that
 closing an *unstroked* contour is a safe fix, not a lossy one — a fill already
 renders open subpaths as closed, so writing the `Z` changes nothing.
 
+- **A5** — the geometry layer: a new check (`geometry.min_feature_size`, which
+  finds detail a needle cannot render) and three fixes. Flattening curves to
+  points is pure Python and always available, so *measuring* a design never
+  needs a compiled dependency; offsetting and boolean operations use
+  [shapely](https://shapely.readthedocs.io/) and are detected at runtime.
+
+| Rule | Fix | Risk |
+| --- | --- | --- |
+| `stroke.min_width` | thicken strokes to the minimum (no geometry backend needed) | lossy |
+| `stroke.forbidden` | redraw the stroke as the filled shape it paints | lossy |
+| `geometry.min_feature_size` | cut away detail too fine to stitch | destructive |
+
+A stroke converted to an outline comes out **pixel-identical** — an 80 mm box
+stroked at 4 mm is exactly the 84 mm square minus the 76 mm one. The last of
+the three is the first `destructive` fix in the project and stays out of every
+run that does not ask for it by name: nothing makes a thin shape thick without
+inventing artwork, so the only honest repair is to remove what the needle was
+going to drop, and to make you say so.
+
+Without the geometry extra those two fixes are unavailable and
+`geometry.min_feature_size` reports that it did not measure — it never changes
+a verdict based on what happens to be installed.
+
 `svgemb rules` marks which rules are fixable and at what risk; the `svgemb fix`
 command lands in A6.
 
@@ -293,8 +317,10 @@ There is deliberately **no separate mobile edition** — see the decision in
 
 ## What is *not* checked
 
-- **Minimum detail/gap size** — needs real path outline analysis (offsetting),
-  not just attribute inspection. `stroke.min_width` covers stroke weight only.
+- **Minimum gap size** — the other half of `geometry.min_feature_size`: two
+  shapes close enough to bleed into each other once stitched. Same machinery
+  (a closing rather than an opening); it lands with the tracer, which needs it
+  to keep neighbouring colours from leaving seams.
 - **Overlapping shapes / stitch order** — out of scope for a static checker.
 - **`<use>` clones** are flagged (via `element.forbidden`) rather than expanded.
 - Colours behind `url(#…)` references count as "not a flat colour"; the gradient
@@ -303,7 +329,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 247 tests
+python -m pytest        # 295 tests
 ```
 
 Layout:
@@ -321,6 +347,7 @@ src/svg_embroidery/
   writer.py        serialising back out without damaging the file
   roundtrip.py     proof that read -> write changes nothing (roadmap A0)
   visual.py        render + compare images; pure-Python PNG (roadmap A1)
+  geometry.py      flattening (pure Python) + offsetting/booleans (roadmap A5)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
   server.py        stdlib-only web UI (svgemb serve)

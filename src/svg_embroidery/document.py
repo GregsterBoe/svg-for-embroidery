@@ -351,13 +351,20 @@ class Node:
     tag: str
     location: str
     style: Dict[str, str]
-    transform_scale: float
+    #: Cumulative transform from this element's own coordinates to the root's
+    #: user units — every ancestor's ``transform`` multiplied together.
+    matrix: Tuple[float, ...]
     depth: int
     parent: Optional["Node"] = None
     #: True when this element or an ancestor is display:none.
     hidden: bool = False
     #: Position in the document-order node list.
     index: int = 0
+
+    @property
+    def transform_scale(self) -> float:
+        """Uniform scale the ancestors apply, derived from :attr:`matrix`."""
+        return matrix_scale(self.matrix)
 
     @property
     def element_id(self) -> Optional[str]:
@@ -451,9 +458,43 @@ def transform_matrix(value: Optional[str]) -> Tuple[float, ...]:
 
 
 def matrix_scale(matrix: Sequence[float]) -> float:
-    """Uniform scale factor of a matrix (geometric mean of the axes)."""
+    """Uniform scale factor of a matrix (geometric mean of the axes).
+
+    Multiplicative along a chain of transforms, because ``det(AB) ==
+    det(A)det(B)`` — so accumulating the matrices and taking this at the end
+    gives the same number as multiplying the per-element scales.
+    """
     determinant = abs(matrix[0] * matrix[3] - matrix[1] * matrix[2])
     return math.sqrt(determinant) if determinant > 0 else 1.0
+
+
+def apply_matrix(matrix: Sequence[float], point: Tuple[float, float]) -> Tuple[float, float]:
+    """Map a point through an SVG matrix ``(a, b, c, d, e, f)``."""
+    x, y = point
+    return (
+        matrix[0] * x + matrix[2] * y + matrix[4],
+        matrix[1] * x + matrix[3] * y + matrix[5],
+    )
+
+
+def invert_matrix(matrix: Sequence[float]) -> Optional[Tuple[float, ...]]:
+    """The inverse transform, or ``None`` when the matrix is singular.
+
+    Needed to bring a shape computed in millimetre space back into the
+    coordinates the element is actually written in.
+    """
+    a, b, c, d, e, f = matrix
+    determinant = a * d - b * c
+    if abs(determinant) < 1e-12:
+        return None
+    return (
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+        (c * f - d * e) / determinant,
+        (b * e - a * f) / determinant,
+    )
 
 
 def parse_style(value: Optional[str]) -> Dict[str, str]:
@@ -596,7 +637,7 @@ def _resolve_size(root: ElementTree.Element) -> Tuple[Optional[float], Optional[
 def _walk(
     element: ElementTree.Element,
     inherited_style: Dict[str, str],
-    inherited_scale: float,
+    inherited_matrix: Tuple[float, ...],
     location: str,
     depth: int,
     parent: Optional[Node],
@@ -613,7 +654,7 @@ def _walk(
         own = element_style(child)
         style = dict(inherited_style)
         style.update(own)
-        scale = inherited_scale * matrix_scale(transform_matrix(child.get("transform")))
+        matrix = _multiply(inherited_matrix, transform_matrix(child.get("transform")))
         # display is not inherited, but a hidden ancestor hides the subtree.
         child_hidden = hidden or own.get("display", "").strip().lower() == "none"
         node = Node(
@@ -621,14 +662,14 @@ def _walk(
             tag=tag,
             location=child_location,
             style=style,
-            transform_scale=scale,
+            matrix=matrix,
             depth=depth,
             parent=parent,
             hidden=child_hidden,
             index=len(out),
         )
         out.append(node)
-        _walk(child, style, scale, child_location, depth + 1, node, child_hidden, out)
+        _walk(child, style, matrix, child_location, depth + 1, node, child_hidden, out)
 
 
 def parse_svg(source: str, path: Optional[Path] = None) -> SvgDocument:
@@ -654,11 +695,11 @@ def parse_svg(source: str, path: Optional[Path] = None) -> SvgDocument:
     width_mm, height_mm, user_unit_mm, size_source = _resolve_size(root)
     root_style = dict(DEFAULT_STYLE)
     root_style.update(element_style(root))
-    root_scale = matrix_scale(transform_matrix(root.get("transform")))
+    root_matrix = transform_matrix(root.get("transform"))
 
     nodes: List[Node] = []
     root_hidden = root_style.get("display", "").strip().lower() == "none"
-    _walk(root, root_style, root_scale, "/svg", 1, None, root_hidden, nodes)
+    _walk(root, root_style, root_matrix, "/svg", 1, None, root_hidden, nodes)
 
     return SvgDocument(
         path=path,

@@ -17,7 +17,14 @@ rules:
       max_colors: 2
 
   # Strokes are not allowed at all here, so the width check is pointless.
+  # What replaces it measures the filled shapes themselves: an outline that
+  # was converted to a filled path is still too fine to stitch if it was
+  # drawn hair-thin. Needs the geometry extra; without it, not measured.
   - id: stroke.forbidden
+
+  - id: geometry.min_feature_size
+    params:
+      min_mm: 1.5
 
   - id: path.max_count
     params:

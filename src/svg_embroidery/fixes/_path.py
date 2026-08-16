@@ -1,61 +1,24 @@
-"""Just enough path parsing to find where a subpath starts and ends.
+"""Where a subpath starts and ends, for the fixers that edit ``d`` as text.
 
 Closing a contour needs one number: how far the pen finished from where it
-started. That means walking the commands and tracking the current point — not
-flattening curves, not computing areas. Full geometry arrives with the geometry
-layer in step A5.
+started. Tracking the current point is enough for that — no curve is ever
+flattened here, because the edit is a ``Z`` appended to the original text and
+every byte the designer wrote stays where it was.
+
+Commands are tokenised by :mod:`svg_embroidery.geometry`, which needs the same
+walk to flatten curves properly. ``ARGUMENT_COUNT`` and :func:`iter_commands`
+are re-exported so this module still reads as one piece.
 """
 
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
-from typing import Iterator, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
+
+from ..geometry import ARGUMENT_COUNT, iter_commands  # noqa: F401
 
 Point = Tuple[float, float]
-
-#: How many numbers each command takes.
-ARGUMENT_COUNT = {
-    "M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7, "Z": 0,
-}
-
-_TOKEN_RE = re.compile(
-    r"([MmZzLlHhVvCcSsQqTtAa])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
-)
-
-
-def iter_commands(d: str) -> Iterator[Tuple[str, List[float]]]:
-    """Yield ``(command, args)`` pairs, expanding implicit repeats.
-
-    ``M 0 0 1 1 2 2`` means a move followed by two line-tos, which is why the
-    repeat of ``M`` becomes ``L`` (and ``m`` becomes ``l``).
-    """
-    tokens = _TOKEN_RE.findall(d or "")
-    index = 0
-    command = ""
-    while index < len(tokens):
-        letter, number = tokens[index]
-        if letter:
-            command = letter
-            index += 1
-        elif not command:
-            index += 1  # numbers before any command: malformed, skip
-            continue
-
-        count = ARGUMENT_COUNT[command.upper()]
-        args: List[float] = []
-        while len(args) < count:
-            if index >= len(tokens) or tokens[index][0]:
-                return  # ran out of numbers: stop rather than guess
-            args.append(float(tokens[index][1]))
-            index += 1
-        yield command, args
-
-        if command == "M":
-            command = "L"
-        elif command == "m":
-            command = "l"
 
 
 @dataclass

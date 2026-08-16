@@ -156,6 +156,13 @@ def _installed_renderers():
     return available_renderers()
 
 
+def _installed_geometry():
+    """Likewise for path geometry — one answer, from the code that uses it."""
+    from .geometry import available_backends
+
+    return [backend.name for backend in available_backends()]
+
+
 CAPABILITIES: Sequence[Capability] = (
     Capability(
         key="core",
@@ -188,11 +195,13 @@ CAPABILITIES: Sequence[Capability] = (
         key="geometry",
         title="Path geometry",
         enables="stroke → filled outline, minimum feature size, boolean ops",
-        requirements=(
-            Requirement("shapely", "module", "shapely"),
-            Requirement("pyclipper", "module", "pyclipper"),
-        ),
+        # shapely only. A5 picked one stack rather than abstracting over two:
+        # the work is not just offsetting — the thinness test needs areas and
+        # validity repair as well, and pyclipper offsets integer coordinates,
+        # which would mean choosing a scale factor and living with it.
+        requirements=(Requirement("shapely", "module", "shapely"),),
         mode="any",
+        probe=_installed_geometry,
         hints={
             "termux": 'pkg install geos && pip install shapely   (may need to build; if it '
             "fails, run the heavy steps on a desktop and use svgemb serve)",

@@ -104,8 +104,16 @@ def test_a_rule_can_have_a_safe_and_a_lossy_fix():
     assert risks == [Risk.SAFE, Risk.LOSSY]  # safest first
 
 
-def test_no_fixer_is_destructive_yet():
-    assert {fixer.risk for fixer in available_fixers()} <= {Risk.SAFE, Risk.LOSSY}
+def test_only_removing_artwork_is_destructive():
+    """A5 opened the top tier: deleting detail a needle cannot render.
+
+    Nothing else has earned it — every other repair either preserves the
+    picture or changes it within a declared budget.
+    """
+    destructive = {
+        fixer.rule_id for fixer in available_fixers() if fixer.risk is Risk.DESTRUCTIVE
+    }
+    assert destructive == {"geometry.min_feature_size"}
 
 
 def test_lossy_fixes_stay_out_of_a_default_run():

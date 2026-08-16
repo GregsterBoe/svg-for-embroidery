@@ -379,7 +379,114 @@ colour remap is reported.
 
 </details>
 
-### A5. Geometry-dependent fixes · size L — **shared with Phase B**
+### A5. Geometry-dependent fixes · ✅ CLEARED — **shared with Phase B**
+
+Lives in `geometry.py`, and it is split where the dependency is, not where the
+topic is:
+
+- **Flattening is pure Python and always available.** Turning `d="M0 0 C…"`
+  into points is de Casteljau plus the endpoint-arc formula — the same
+  judgement A1 made about decoding PNG. So *measuring* a design never needs a
+  compiled dependency, and the one check people trip over most (`stroke.min_width`)
+  is repaired by arithmetic that runs on a phone.
+- **Offsetting and booleans need a backend**, which is the fragile tier. A1's
+  pattern exactly: `default_backend()` returns `None`, callers skip, and the
+  file's verdict does not change. A test asserts that last part directly,
+  because a checker whose answer depends on what is installed is worse than one
+  that measures less.
+
+**Decision: shapely, not pyclipper — and not both.** The work here is not only
+offsetting: the thinness test needs areas and validity repair too, and shapely
+has all three with floating-point coordinates. pyclipper offsets integers,
+which means choosing a scale factor and living with it. Abstracting over two
+backends would have doubled the code to hedge a bet nobody asked us to make.
+`svgemb doctor` now *probes* the geometry module instead of listing modules, so
+it can no longer advertise a library the code will not use — it had been
+offering pyclipper.
+
+**No `svgpathtools` either.** The plan named it for parsing and flattening, but
+the fix protocol already had a path scanner (A4 wrote one to find where
+subpaths end) and flattening is ~120 lines on top of it. Adding a dependency to
+avoid that would have put the *pure Python* half of this step behind an install.
+
+**New check: `geometry.min_feature_size`** — the one the README listed as *not
+implemented*. A shape is stitchable where a disc the width of a stitch fits
+inside it, so shrinking by half that width and growing it back leaves exactly
+the part that survives; whatever disappears is the defect. Two failures, said
+differently because they mean different things: a shape that vanishes entirely
+is a hairline, and one that loses a fraction of itself has a spike or a waist.
+
+**The corner allowance is the part that makes it usable.** A disc cannot reach
+into a corner, so opening a perfectly solid square still rounds all four off —
+`r²(4−π)/4` each. A 5 mm square at a 1.5 mm limit therefore loses 1.9% of its
+area to nothing but its own corners, and a naive threshold reports every small
+rectangle in the file. So the rule computes what the corners were always going
+to cost (`Σ r²(tan(θ/2) − θ/2)` over the vertices, which falls off as `θ³` and
+so charges a flattened curve nothing) and only the *rest* counts. Real geometry
+subtracted, rather than hidden under a fudge factor.
+
+The check is in `embroidery-strict` and `plotter-vinyl`, whose descriptions
+already promised "thicker minimum details" and "hair-thin details tear when
+weeding" without delivering either. It is deliberately **not** in
+`embroidery-basic`: that profile is the common denominator, and its verdict
+should not vary with what a machine has installed.
+
+Three fixers, and the batch is grouped by what they *need* rather than by risk —
+the axis that matters when two of the three can be unavailable:
+
+| Rule | Fix | Risk | Backend |
+| --- | --- | --- | --- |
+| `stroke.min_width` | thicken strokes to the minimum | lossy | no |
+| `stroke.forbidden` | redraw the stroke as the filled shape it paints | lossy | yes |
+| `geometry.min_feature_size` | cut away detail too fine to stitch | **destructive** | yes |
+
+**Stroke → outline came out pixel-identical**, which was not a given: an 80 mm
+box stroked at 4 mm becomes exactly the 84 mm square minus the 76 mm one, and
+the renderer cannot tell the two files apart. It is still classified lossy —
+curves are flattened to 0.02 mm and round joins become polygons, so *some* file
+will move a pixel — but the budget is 5% and the measured answer is zero.
+
+**Widening was left as the fix for `stroke.min_width`, not outlining.** The plan
+said "widen thin strokes; better, convert stroke→filled outline", and that turns
+out to be wrong on inspection: outlining a hairline satisfies the rule by
+deleting the stroke, while leaving artwork just as thin as it was. It passes the
+check by removing what the check was looking at. Widening is the honest repair
+there; outlining is the honest repair for `stroke.forbidden`, which is what that
+rule actually asks for. The two compose — outline first, then the new
+`min_feature_size` check measures the filled result.
+
+**The first destructive fixer.** Nothing turns a thin thing into a thick one
+without inventing shape the designer did not draw, so the only honest repair is
+to remove what the needle was going to drop anyway — and to make the user ask
+for it by name. The tier had been empty since A2 defined it.
+
+Its first version was wrong in an instructive way: the opening *is* the
+measurement, so applying it as the repair rounded off every corner in the design
+— including the ones the corner allowance had just finished excusing. The fix
+changed more than the check had complained about, and handed back right angles
+drawn as sixteen-segment arcs. Growing the eroded core back by *twice* the
+radius and intersecting with the original repairs that: a corner sits `r√2` from
+the core, comfortably inside `2r`, so every boundary that was fine returns
+exactly as drawn and only the thin runs stay cut. Straight lines stay straight
+lines, and the diff is the shape that was broken.
+
+**Node now carries its full transform matrix**, not just the scale it works out
+to. Measuring in millimetres means mapping points through the whole ancestor
+chain, and reshaping means mapping the answer back — so `document.py`
+accumulates the matrix and `transform_scale` derives from it. Free, because
+`det(AB) = det(A)det(B)` makes the old per-element product identical to the new
+one; the existing test that a scale is cumulative passes unchanged.
+
+**Done when:** ~~offsetting a known shape matches a hand-computed result~~ ✅
+(102² − 98² = 800 mm², to the last decimal), ~~and the new min-feature check
+finds the defect in a purpose-built test file~~ ✅ — `examples/thin-detail.svg`
+is a file every attribute-level check calls perfect: 12×12 cm, one colour, one
+layer, every contour closed, not a stroke in it. The geometry finds a hairline,
+a needle spike and a 0.6 mm waist, and leaves the 3 mm square and the disc
+alone.
+
+<details>
+<summary>Original plan for this step</summary>
 
 These need real path maths, which is also what Phase B needs. Build the geometry
 layer once, here.
@@ -397,11 +504,23 @@ compiled ones go in the optional extra, keeping the core Termux-safe.
 **Done when:** offsetting a known shape matches a hand-computed result, and the
 new min-feature check finds the defect in a purpose-built test file.
 
+</details>
+
+> **Still open: narrow gaps.** The opening finds detail too thin; the closing
+> (grow, then shrink) finds *gaps* too narrow — two shapes that will bleed into
+> each other once they are stitched. Same backend, same shape of code, and B4
+> needs it anyway to stop neighbouring colour masks leaving hairline seams. It
+> is left there rather than done twice.
+
 ### A6. Surfacing it · size S
 
 - CLI: `svgemb fix design.svg -p myshop -o fixed.svg`, `--dry-run` (show a diff
-  and the risk of each change), `--allow lossy`, `--only <rule.id>`, `--in-place`
+  and the risk of each change), `--allow lossy` / `--allow destructive`,
+  `--only <rule.id>`, `--in-place`
 - Always re-check after fixing and print the before/after verdict
+- Report what was *skipped* as prominently as what was fixed: after A5 a skip
+  can mean "install the geometry extra", which is actionable and currently only
+  visible through the library
 - Web UI: a **Fix what can be fixed** button, before/after preview, download
 
 **Done when:** `svgemb fix examples/bad-design.svg` turns a failing file into a
@@ -420,9 +539,13 @@ report it as a manual step. Revisit only if it becomes the top complaint.
 ## Gate between the phases
 
 Do not start Phase B until: ~~A0 round-trips cleanly~~ ✅, ~~A1 can measure
-visual difference~~ ✅, A3 fixers hold their four invariants, and A5 has a
-working geometry layer. Phase B leans on all four — starting early means debugging a tracer and a
-broken writer at the same time.
+visual difference~~ ✅, ~~A3 fixers hold their four invariants~~ ✅ (and every
+fixer since, via `verify_fixer()`), and ~~A5 has a working geometry layer~~ ✅.
+Phase B leans on all four — starting early means debugging a tracer and a broken
+writer at the same time.
+
+**The gate is clear.** A6 is the only step of Phase A left, and it is surfacing
+work rather than machinery: nothing in Phase B waits on it.
 
 ---
 

@@ -38,4 +38,11 @@ rules:
 
   - id: stroke.forbidden
 
+  # "Hair-thin details tear when weeding" is a measurement, not a warning in
+  # the description. A blade tracks a finer line than a needle stitches, so
+  # the limit is lower than the embroidery profiles'.
+  - id: geometry.min_feature_size
+    params:
+      min_mm: 1.0
+
   - id: fill.required

@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from svg_embroidery.geometry import default_backend
-from svg_embroidery.server import MAX_BODY_BYTES, CheckRequestHandler
+from svg_embroidery.server import BUILD, MAX_BODY_BYTES, CheckRequestHandler
 
 
 @pytest.fixture(scope="module")
@@ -287,3 +287,73 @@ def test_the_page_offers_the_fix_and_a_download(base_url):
     assert "api/fix" in body
     assert "Download the fixed SVG" in body
     assert "URL.createObjectURL" in body  # the download never leaves the device
+
+
+# -- a tab left open across a restart --------------------------------------
+
+def headers_of(url):
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return dict(response.headers)
+
+
+def test_the_page_carries_the_build_that_served_it(base_url):
+    _, body = get(base_url + "/")
+    assert BUILD in body
+    assert "__SVGEMB_BUILD__" not in body, "the placeholder must be substituted"
+    # Every response says which build answered, so any of them can catch a
+    # stale tab — not only the one that happens to fetch the page.
+    for route in ("/", "/api/profiles"):
+        assert headers_of(base_url + route)["X-Svgemb-Build"] == BUILD
+    status, _ = post_json(base_url + "/api/check", {"svg": GOOD})
+    assert status == 200
+
+
+def test_the_stamp_moves_when_the_page_does_and_not_otherwise():
+    """Otherwise the banner either never fires or fires on every restart."""
+    import hashlib
+
+    from svg_embroidery import server
+
+    again = hashlib.sha256(server.INDEX_HTML.encode("utf-8")).hexdigest()[:12]
+    assert again == BUILD, "an unchanged page keeps its stamp across restarts"
+
+    edited = server.INDEX_HTML.replace("Fix what can be fixed", "Repair it")
+    assert hashlib.sha256(edited.encode("utf-8")).hexdigest()[:12] != BUILD
+
+
+def test_a_handler_never_shadows_a_function_it_has_to_call():
+    """``renderFix(fix)`` once hid the global ``fix()`` from its own buttons.
+
+    The handlers are defined inside these functions, so a parameter sharing a
+    name with one of them silently rebinds it, and every click throws. Nothing
+    in the page can catch that at load time, so catch it here.
+    """
+    import re
+
+    from svg_embroidery.server import INDEX_HTML
+
+    js = re.search(r"<script>(.*?)</script>", INDEX_HTML, re.S).group(1)
+    declared = set(re.findall(r"^function (\w+)\(", js, re.M))
+    assert {"fix", "check", "render", "renderFix", "download"} <= declared
+
+    for name, params in re.findall(r"function (\w+)\(([^)]*)\)", js):
+        taken = {p.strip() for p in params.split(",") if p.strip()}
+        clash = taken & declared
+        assert not clash, f"{name}() takes a parameter named {clash}, hiding it"
+
+
+def test_the_page_says_so_when_it_breaks(base_url):
+    """A silent exception is what turned one bug into an unusable page."""
+    _, body = get(base_url + "/")
+    assert "window.addEventListener('error'" in body
+    assert "unhandledrejection" in body
+    assert 'id="crash"' in body
+
+
+def test_a_tab_running_an_older_build_is_told_to_reload(base_url):
+    _, body = get(base_url + "/")
+    assert "id=\"stale\"" in body
+    assert "served !== BUILD" in body  # the comparison that raises the banner
+    assert "location.reload()" in body
+    # Wired into every request, so the notice appears on the next thing you do.
+    assert body.count(".then(fresh)") == 3

@@ -16,6 +16,7 @@ being edited.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -122,12 +123,19 @@ input[type=file] { display: none; }
 .opt .risk { float: right; margin-left: 8px; }
 .opt.danger { border-color: var(--err); }
 .opt.danger .risk { color: var(--err); border-color: var(--err); }
+.stale { cursor: pointer; font-weight: 400; }
 footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top: 20px; }
 </style>
 </head>
 <body>
 <h1>SVG embroidery check</h1>
 <div class="sub" id="host"></div>
+
+<div class="verdict fail stale hidden" id="stale">
+  ⚠️ This tab is running an older svgemb than the one answering it — anything new
+  is missing here. <u>Tap to reload.</u>
+</div>
+<div class="verdict fail hidden" id="crash"></div>
 
 <div class="card">
   <label for="profile">Ruleset</label>
@@ -160,7 +168,30 @@ footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top:
 const $ = (id) => document.getElementById(id);
 let profiles = [], lastSvg = null, lastName = null;
 
-fetch('api/profiles').then(r => r.json()).then(data => {
+// An exception thrown while wiring up buttons used to be invisible: the page
+// kept its layout, the handlers were never attached, and tapping did nothing
+// at all. A dead button that says why beats a dead button that doesn't.
+function crashed(message) {
+  $('crash').textContent = '⚠️ Something in this page broke, so parts of it will '
+    + 'not respond: ' + message + ' — reload to start again.';
+  $('crash').classList.remove('hidden');
+}
+window.addEventListener('error', e => crashed(e.message));
+window.addEventListener('unhandledrejection', e => crashed(String(e.reason)));
+
+// A tab left open across a server restart keeps running the JavaScript it was
+// loaded with, so a UI that gained a feature is missing it here and nothing
+// says why. Every response carries the build that served it; when it stops
+// matching ours, say so instead of quietly behaving like the old version.
+const BUILD = '__SVGEMB_BUILD__';
+function fresh(response) {
+  const served = response.headers.get('X-Svgemb-Build');
+  if (served && served !== BUILD) $('stale').classList.remove('hidden');
+  return response;
+}
+$('stale').addEventListener('click', () => location.reload());
+
+fetch('api/profiles').then(fresh).then(r => r.json()).then(data => {
   profiles = data;
   $('profile').innerHTML = data
     .map(p => `<option value="${p.name}">${p.title || p.name}</option>`).join('');
@@ -217,6 +248,7 @@ function check() {
       profile: $('profile').value, strict: $('strict').checked
     })
   })
+  .then(fresh)
   .then(async r => ({ok: r.ok, body: await r.json()}))
   .then(({ok, body}) => {
     if (!ok) {
@@ -305,6 +337,7 @@ function fix() {
       choices: answers
     })
   })
+  .then(fresh)
   .then(async r => ({ok: r.ok, body: await r.json()}))
   .then(({ok, body}) => {
     if (!ok) {
@@ -318,53 +351,55 @@ function fix() {
   });
 }
 
-function renderFix(fix) {
-  const before = fix.before, after = fix.after;
+// Named `result`, not `fix`: the click handlers below close over this scope and
+// have to be able to call the global fix() to re-run with a new answer.
+function renderFix(result) {
+  const before = result.before, after = result.after;
   let html = `<div class="verdict ${after.passed ? 'pass' : 'fail'}">
     ${before.passed ? '✅' : '❌'} → ${after.passed ? '✅ PASS' : '❌ FAIL'} —
     ${before.counts.error} → ${after.counts.error} error(s),
     ${before.counts.warning} → ${after.counts.warning} warning(s)</div>`;
 
-  if (!fix.ok) {
+  if (!result.ok) {
     html += `<div class="verdict fail">svgemb caught its own output misbehaving:
-      ${escapeHtml(fix.verification_error)}. Nothing is offered for download.</div>`;
+      ${escapeHtml(result.verification_error)}. Nothing is offered for download.</div>`;
   }
 
   // The questions come first: they are the part that needs someone.
-  for (const decision of fix.pending) html += renderAsk(decision);
+  for (const decision of result.pending) html += renderAsk(decision);
 
   html += '<div class="card">';
-  if (!fix.applied.length && !fix.pending.length) {
+  if (!result.applied.length && !result.pending.length) {
     html += '<p>Nothing could be repaired automatically.</p>';
   }
-  for (const f of fix.applied) {
+  for (const f of result.applied) {
     html += `<div class="f info"><div class="msg">✅ ${escapeHtml(f.rule)}
       <span class="risk">${escapeHtml(f.risk)}</span></div>` +
       (f.chosen ? `<div class="hint">you chose: ${escapeHtml(f.chosen.label)}</div>` : '') +
       f.changes.map(c => `<div class="hint">${escapeHtml(c.description)}</div>`).join('') +
       '</div>';
   }
-  for (const s of fix.skipped) {
+  for (const s of result.skipped) {
     html += `<div class="f warning"><div class="msg">⏭ ${escapeHtml(s.rule)}
       ${s.risk ? `<span class="risk">${escapeHtml(s.risk)}</span>` : ''}</div>
       <div class="hint">${escapeHtml(s.reason)}</div></div>`;
   }
-  for (const u of fix.unmeasured) {
+  for (const u of result.unmeasured) {
     html += `<div class="f"><div class="msg">ℹ️ ${escapeHtml(u.rule)}</div>
       <div class="hint">${escapeHtml(u.message)}</div></div>`;
   }
-  html += `<div class="desc">${fix.visual
-    ? escapeHtml(fix.visual.text)
+  html += `<div class="desc">${result.visual
+    ? escapeHtml(result.visual.text)
     : 'No renderer on this machine, so the change was not measured against the image.'}</div>`;
   html += '</div>';
 
-  if (fix.changed) {
+  if (result.changed) {
     html += `<div class="card"><div class="ba">
       <figure><figcaption>before</figcaption><img id="ba-before" alt="before"></figure>
       <figure><figcaption>after</figcaption><img id="ba-after" alt="after"></figure>
     </div></div>`;
   }
-  if (fix.ok && fix.changed) {
+  if (result.ok && result.changed) {
     html += '<div class="stack"><button id="download">Download the fixed SVG</button>' +
             '<button class="secondary" id="usefix">Keep going from the fixed file</button></div>';
   }
@@ -378,14 +413,14 @@ function renderFix(fix) {
       fix();
     });
   }
-  if (fix.changed) {
+  if (result.changed) {
     $('ba-before').src = dataUri(lastSvg);
-    $('ba-after').src = dataUri(fix.svg);
+    $('ba-after').src = dataUri(result.svg);
   }
   if ($('download')) {
-    $('download').addEventListener('click', () => download(fix.svg));
+    $('download').addEventListener('click', () => download(result.svg));
     $('usefix').addEventListener('click', () => {
-      lastSvg = fix.svg;
+      lastSvg = result.svg;
       $('preview').src = dataUri(lastSvg);
       check();
     });
@@ -414,6 +449,13 @@ $('host').textContent = location.host;
 </html>
 """
 
+#: The placeholder the page carries so it can recognise its own vintage. The
+#: stamp is hashed from the template *before* substitution, so it does not
+#: depend on itself and stays identical across restarts of unchanged code.
+_BUILD_TOKEN = "__SVGEMB_BUILD__"
+BUILD = hashlib.sha256(INDEX_HTML.encode("utf-8")).hexdigest()[:12]
+_PAGE = INDEX_HTML.replace(_BUILD_TOKEN, BUILD).encode("utf-8")
+
 
 class CheckRequestHandler(BaseHTTPRequestHandler):
     server_version = "svgemb"
@@ -430,6 +472,7 @@ class CheckRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Svgemb-Build", BUILD)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -473,7 +516,7 @@ class CheckRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/":
-            self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            self._send(200, _PAGE, "text/html; charset=utf-8")
         elif path == "/api/profiles":
             self._send_json(200, self._profiles_payload())
         else:

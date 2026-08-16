@@ -423,7 +423,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 353 tests
+python -m pytest        # 358 tests
 ```
 
 Layout:

@@ -5,13 +5,20 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set
 
 from .checker import Checker
 from .document import SvgParseError, load_svg
-from .fixes import FixEngine, Risk, fixer_classes_for, risks_up_to
+from .fixes import (
+    FixEngine,
+    Risk,
+    answer_from_mapping,
+    fixer_classes_for,
+    risks_up_to,
+)
 from .profiles import ProfileError, list_profiles, load_profile
 from .report import (
+    _render_decision,
     render_fix_json,
     render_fix_summary,
     render_fix_text,
@@ -21,6 +28,9 @@ from .report import (
 )
 from .rules import RuleConfigError, available_rules
 from .writer import WriterError
+
+if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
+    from .fixes import Decision
 
 DEFAULT_PROFILE = "embroidery-basic"
 
@@ -105,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="RULE",
         help="fix only these rules (repeatable, or comma separated)",
+    )
+    fix.add_argument(
+        "--choose",
+        action="append",
+        metavar="RULE=OPTION",
+        help="answer a repair's question up front (repeatable); "
+        "RULE= on its own takes the recommended answer",
+    )
+    fix.add_argument(
+        "-I",
+        "--interactive",
+        action="store_true",
+        help="ask the questions at the terminal instead of printing them",
     )
     fix.add_argument("--json", action="store_true", help="machine readable output")
     fix.add_argument("--strict", action="store_true", help="treat warnings as failures")
@@ -232,6 +255,43 @@ def _selected_rules(args: argparse.Namespace, profile) -> Optional[Set[str]]:
     return wanted
 
 
+def _parse_choices(values: Optional[Sequence[str]]) -> Dict[str, str]:
+    """``--choose rule.id=option`` pairs, as a mapping."""
+    answers: Dict[str, str] = {}
+    for value in values or ():
+        rule_id, separator, option = value.partition("=")
+        if not separator or not rule_id.strip():
+            raise ValueError(f"--choose wants RULE=OPTION, got '{value}'")
+        answers[rule_id.strip()] = option.strip()
+    return answers
+
+
+def _ask_at_the_terminal(stream) -> Callable[["Decision"], Optional[str]]:
+    """Put each question to whoever is sitting there, once."""
+
+    def decide(decision: "Decision") -> Optional[str]:
+        print(file=stream)
+        print("\n".join(_render_decision(decision)[:-1]), file=stream)
+        default = decision.default
+        suffix = f" [{default.key}]" if default else ""
+        keys = {option.key for option in decision.options}
+        while True:
+            try:
+                answer = input(f"       choose ({'/'.join(sorted(keys))}, or skip){suffix}: ")
+            except EOFError:  # not a terminal after all — leave it open
+                return None
+            answer = answer.strip()
+            if answer in ("skip", "none", "no"):
+                return None
+            if not answer:
+                return default.key if default else None
+            if answer in keys:
+                return answer
+            print(f"       '{answer}' is not one of them.", file=stream)
+
+    return decide
+
+
 def _destructive_rules(profile, selected: Optional[Set[str]]) -> List[str]:
     """Rules in play that have a destructive repair."""
     return sorted(
@@ -273,29 +333,37 @@ def _cmd_fix(args: argparse.Namespace) -> int:
         profile = load_profile(args.profile)
         Checker(profile)  # surfaces a bad parameter before anything is touched
         selected = _selected_rules(args, profile)
+        answers = _parse_choices(args.choose)
     except (ProfileError, RuleConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     allow = risks_up_to(args.allow)
-    if Risk.DESTRUCTIVE in allow and selected is None:
+    if Risk.DESTRUCTIVE in allow:
         # A destructive repair deletes or reshapes artwork, so it is asked for
         # one rule at a time. "--allow destructive" alone is too broad a wish to
-        # honour: it would mean "do anything at all to make this pass".
-        candidates = _destructive_rules(profile, None)
+        # honour: it would mean "do anything at all to make this pass". Naming
+        # the rule counts either way — --only selects it, --choose answers its
+        # question, and both are the user saying the rule out loud.
+        # Only what this run could actually reach: --only has already narrowed
+        # the field, so naming a rule there is naming it here too.
+        candidates = _destructive_rules(profile, selected)
+        named = set(selected or ()) | set(answers)
+        unnamed = [rule_id for rule_id in candidates if rule_id not in named]
         if not candidates:
             print(
                 f"error: no rule in profile '{profile.name}' has a destructive fix",
                 file=sys.stderr,
             )
-        else:
-            listed = " ".join(f"--only {rule_id}" for rule_id in candidates)
+            return 2
+        if unnamed:
+            listed = " ".join(f"--only {rule_id}" for rule_id in unnamed)
             print(
                 "error: a destructive fix changes what the design means, so it has to "
                 f"be asked for by name: {listed}",
                 file=sys.stderr,
             )
-        return 2
+            return 2
 
     if args.json and args.stdout:
         print("error: --json and --stdout both claim stdout; pick one", file=sys.stderr)
@@ -319,7 +387,17 @@ def _cmd_fix(args: argparse.Namespace) -> int:
 
     # Whatever claims stdout — the fixed SVG, or the JSON — the report moves aside.
     stream = sys.stderr if (args.stdout or args.json) else sys.stdout
-    engine = FixEngine(profile, allow=allow, only=selected, verify=not args.no_verify)
+
+    # An explicit --choose always wins; -I only asks about what it leaves open.
+    decide = answer_from_mapping(answers) if answers else None
+    if args.interactive:
+        ask = _ask_at_the_terminal(stream)
+        given = decide
+        decide = (lambda d: (given(d) if given else None) or ask(d)) if given else ask
+
+    engine = FixEngine(
+        profile, allow=allow, only=selected, verify=not args.no_verify, decide=decide
+    )
 
     reports = []
     for path in files:

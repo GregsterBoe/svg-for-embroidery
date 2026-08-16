@@ -23,7 +23,7 @@ corner.
 | --- | --- |
 | **The core stays dependency-free** (stdlib + PyYAML) | It runs in Termux with no toolchain. Heavier work goes in optional extras (`[render]`, `[geometry]`, `[convert]`) and is detected at runtime — see the decision below. Installing the converter must never be required to run the checker. |
 | **The profile is the spec** | Rules already encode what a shop wants. Fixers and the converter read their targets from the *same* profile — max colours becomes the quantiser's `k`, min stroke width becomes a morphology kernel, canvas size becomes output dimensions. No second source of truth. |
-| **Never destroy input** | Fixes write to a new file by default. `--in-place` requires an explicit flag and keeps a `.bak`. |
+| **Never destroy input** | Fixes write to a new file by default — in fact `svgemb fix` writes nothing at all without `-o`, `--in-place` or `--stdout`. `--in-place` requires an explicit flag and keeps a `.bak`. |
 | **Every step ends at a gate** | Each step below has a *done when* that can be checked by running something, not by opinion. If a gate fails, we stop and fix it rather than stacking the next step on top. |
 
 ---
@@ -564,8 +564,9 @@ embroidery-strict` prints exactly one line, and it is the `pip install`.
   the exact flag to type instead. A2's docstring always said destructive fixes
   are "asked for explicitly, per rule"; without this the flag would have meant
   "do anything at all to make this pass", which is not a wish anyone can grant
-  responsibly. The web UI does not offer the level at all — one tap must not
-  delete artwork — and says so with the command to run instead.
+  responsibly. (A7 widened *naming* to include `--choose rule.id=answer`, which
+  is at least as explicit as `--only`, and narrowed the requirement to the rules
+  a run can actually reach — with `--only` already set, the field is named.)
 
 **Exit code 3.** `1` means your file still has errors, which is ordinary and
 expected. A verification failure is a different event entirely: the engine
@@ -579,7 +580,8 @@ skipped / not-measured lists, a before-and-after preview pair, and a download
 built from a `Blob` — so the fixed file never touches the server's disk and
 never leaves the device. There is also *Keep going from the fixed file*, which
 feeds the result back through the checker, since the realistic loop is fix, look,
-allow one more level, look again.
+allow one more level, look again. (A7 added the questions to that page as
+buttons, which is also how a destructive repair became reachable there.)
 
 **Two inconsistencies fixed on the way through, both found by looking at output
 rather than at code:**
@@ -618,6 +620,86 @@ passing one, or explains precisely why it can't.
 
 </details>
 
+### A7. Repairs that ask · ✅ CLEARED
+
+**Added after A6, from use.** A6 was proud of reporting "no automatic fix
+available" clearly. Running it on real files showed what that sentence actually
+is: a dead end, printed politely. The shop wants one colour per layer and the
+artwork has none — something *has* to be regrouped, and the only reason the tool
+stopped is that it did not know which way. That is a question, not a limit.
+
+**The option carries the risk, not the fixer.** This is the piece that makes the
+rest work. `structure.color_layers` has two honest answers and they are not the
+same kind of change:
+
+- *Keep the drawing order* wraps each **run** of same-coloured shapes. A design
+  that goes red, blue, red becomes three layers rather than two, which still
+  satisfies the rule — it asks that no layer mix colours, not that no colour
+  repeat. Nothing is reordered, so it is `safe`, and A1 proves it: the run
+  renders before and after and the images are identical.
+- *One layer per colour* gives exactly one group per thread, which is what a
+  shop's tooling usually wants, by moving shapes past each other. Where two
+  colours overlap, the top one changes. `destructive`.
+
+Same question, two answers, two prices. So `Fixer.risk` became the *cheapest way
+in* — what the engine gates on before asking — and the chosen `Option.risk` is
+what the run is actually held to. A fixer that asks is gated on the answer.
+
+**Nothing blocks on a prompt.** `Decision` is data: the CLI prints it with the
+exact command that answers it (`--allow lossy --choose color.no_gradients=...`,
+assembled from the cheapest option's risk), `-I` asks at the terminal, and the
+web UI renders the options as buttons. A run with no answers is a normal run
+that reports open questions — so this stays usable in a script, and the answers
+end up written down in one.
+
+**Questions are shown even when no answer is affordable yet.** The first version
+skipped them at the default risk level, on the reasonable-sounding grounds that
+you should not be asked something you cannot act on. But a plain `svgemb fix` is
+exactly where someone needs to *find out* a repair exists. Each option prints its
+own price and the answer line names the flag.
+
+**The web UI has no destructive setting, and does not need one.** A switch that
+quietly enables "delete artwork" for a whole run is the thing that must not
+exist; a button that says what it deletes is *better* than a CLI flag, because
+the consequence is written next to it. `FixEngine(ask_first=...)` names that
+policy: a risk listed there is reachable by being chosen and unreachable
+otherwise, so `geometry.min_feature_size` — destructive and offering no choice —
+stays command-line only, while `element.forbidden` can be answered with a tap.
+
+**Four rules ask so far**, chosen as the ones that actually block real uploads:
+
+| Rule | The question | Answers |
+| --- | --- | --- |
+| `structure.color_layers` | how to separate the colours | keep the drawing order (safe) · one per colour (destructive) |
+| `color.no_gradients` | which flat colour replaces the ramp | weighted average · first stop (both lossy) |
+| `element.forbidden` | delete artwork the profile forbids | delete it (destructive) |
+| `path.closed` | close a gap too wide to be a slip | draw the segment (destructive) |
+
+The gradient average is weighted by the span each stop owns, not by stop count,
+so a ramp that is mostly dark averages dark instead of being pulled to the
+midpoint by a sliver of highlight. The `<text>` answer says what the *better*
+answer would have been — converting to paths, which needs the font and is
+therefore Inkscape's job — rather than silently deleting someone's lettering.
+
+**The run now repeats until it settles.** Found by reading output, not code:
+flattening a gradient to a flat colour introduced a fourth colour *after*
+`color.max_count` had already reduced the palette to three, and the engine never
+looked again. The regression guard did not catch it — the error count had not
+gone *up* against the original. So `fix_source` sweeps up to `MAX_PASSES` times
+and stops when a pass changes nothing; skips and questions come from the last
+pass (they describe the file as it now stands) while fixes accumulate across all
+of them.
+
+**Done when** — `examples/bad-design.svg`, written to be unfixable and used as
+A6's "explain why you can't" gate, **passes** once its four questions are
+answered: ❌ 9 errors → ✅ 0. Every answer is held to the same four invariants as
+any other fixer, via `verify_fixer(..., choice=...)`.
+
+> **Still open.** `fill.required`, `path.max_count`, `document.no_raster` and
+> `geometry.aspect_ratio` still report "no automatic fix available". Each is a
+> plausible question — which colour, merge what, trace or drop, pad or crop —
+> and the mechanism is now the cheap part.
+
 ### Explicitly *not* in Phase A
 
 **Text → paths.** Correct conversion means loading the font, extracting glyph
@@ -636,7 +718,7 @@ fixer since, via `verify_fixer()`), and ~~A5 has a working geometry layer~~ ✅.
 Phase B leans on all four — starting early means debugging a tracer and a broken
 writer at the same time.
 
-**The gate is clear, and Phase A is complete.** Every step A0–A6 is done, so
+**The gate is clear, and Phase A is complete.** Every step A0–A7 is done, so
 Phase B starts with a writer that doesn't damage files, a way to measure whether
 an image changed, a fix protocol that verifies its own work, a geometry backend,
 and a command to drive all of it.
@@ -753,7 +835,7 @@ detail → live re-check → download the SVG.
 
 ```
 A0 round-trip ──┬── A2 protocol ── A3 safe ── A4 lossy ──┐
-A1 visual diff ─┘                                        ├── A6 CLI/UI
+A1 visual diff ─┘                                        ├── A6 CLI/UI ── A7 asking
                     A5 geometry ─────────────────────────┘
                          │
                     ═══ GATE ═══

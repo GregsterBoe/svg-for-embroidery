@@ -14,10 +14,13 @@ caller decides. Only ``SAFE`` fixes run unless ``allow`` says otherwise.
 from .base import (  # noqa: F401
     DEFAULT_ALLOWED,
     Change,
+    Decision,
+    Option,
     FixOutcome,
     Fixer,
     FixerError,
     Risk,
+    answer_from_mapping,
     available_fixers,
     build_fixers,
     fixer_classes_for,
@@ -29,20 +32,23 @@ from .engine import AppliedFix, FixEngine, FixReport, SkippedFix  # noqa: F401
 from .verify import FixVerification, verify_fixer, verify_no_op  # noqa: F401
 
 # Importing the modules registers the fixers.
-from . import geometry, lossy, safe  # noqa: F401,E402
+from . import choices, geometry, lossy, safe  # noqa: F401,E402
 
 __all__ = [
     "AppliedFix",
     "Change",
     "DEFAULT_ALLOWED",
+    "Decision",
     "FixEngine",
     "FixOutcome",
     "FixReport",
     "FixVerification",
     "Fixer",
     "FixerError",
+    "Option",
     "Risk",
     "SkippedFix",
+    "answer_from_mapping",
     "available_fixers",
     "build_fixers",
     "fixer_classes_for",

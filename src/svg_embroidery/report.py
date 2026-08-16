@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import TYPE_CHECKING, Iterable, List
 
 from .findings import Report, Severity
@@ -14,6 +15,9 @@ LINE = "─" * 62
 
 #: Marks a check that could not run here. Not a verdict, so not ✅ or ❌.
 UNMEASURED_ICON = "ℹ️"
+
+#: Risk names by rank, for turning a decision's cheapest answer into a flag.
+_RISK_BY_RANK = {0: "safe", 1: "lossy", 2: "destructive"}
 
 
 def render_text(report: Report, strict: bool = False, verbose: bool = False, color: bool = True) -> str:
@@ -61,6 +65,7 @@ def _strip_icons(text: str) -> str:
         ("⚠️", "[warn]"),
         ("ℹ️", "[note]"),
         ("⏭", "[skip]"),
+        ("❓", "[ask]"),
         ("📄", "File:"),
         ("→", "->"),
     ):
@@ -75,6 +80,36 @@ def render_json(reports: Iterable[Report], strict: bool = False) -> str:
 
 def _verdict(report: Report, strict: bool) -> str:
     return "✅ PASS" if report.passed(strict=strict) else "❌ FAIL"
+
+
+def _wrap(text: str, indent: str, width: int = 78) -> List[str]:
+    return textwrap.wrap(text, width=width, initial_indent=indent, subsequent_indent=indent)
+
+
+def _render_decision(decision) -> List[str]:
+    """An open question, with the command that answers it.
+
+    Printed rather than prompted: a run that stops for input cannot go in a
+    script, and the answer is worth recording in one anyway.
+    """
+    lines = [f"❓ your call  {decision.rule_id}"]
+    if decision.context:
+        lines.extend(_wrap(decision.context, "       "))
+    lines.append(f"       {decision.question}")
+    for option in decision.options:
+        mark = "*" if option.recommended else " "
+        lines.append(f"       {mark} {option.key:<10} {option.label}  [{option.risk.value}]")
+        if option.detail:
+            lines.extend(_wrap(option.detail, " " * 20))
+    if not decision.options:  # pragma: no cover - a question always has answers
+        return lines
+    keys = "|".join(option.key for option in decision.options)
+    # The cheapest answer sets the flag you need; anything dearer says so on its
+    # own line above. Printed as one command so it can be pasted straight back.
+    cheapest = min(option.risk.rank for option in decision.options)
+    allow = "" if cheapest == 0 else f"--allow {_RISK_BY_RANK[cheapest]} "
+    lines.append(f"       answer with: {allow}--choose {decision.rule_id}={keys}")
+    return lines
 
 
 def render_fix_text(
@@ -112,7 +147,9 @@ def render_fix_text(
     for finding in report.unmeasured:
         lines.append(f"{UNMEASURED_ICON} not measured  {finding.rule_id}")
         lines.append(f"       {finding.message}")
-    if not (report.applied or report.skipped or report.unmeasured):
+    for decision in report.pending:
+        lines.extend(_render_decision(decision))
+    if not (report.applied or report.skipped or report.unmeasured or report.pending):
         lines.append("Nothing to fix.")
 
     lines.append(LINE)

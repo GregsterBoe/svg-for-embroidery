@@ -1,4 +1,5 @@
 import json
+import pathlib
 import threading
 import urllib.error
 import urllib.request
@@ -6,6 +7,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from svg_embroidery.geometry import default_backend
 from svg_embroidery.server import MAX_BODY_BYTES, CheckRequestHandler
 
 
@@ -183,6 +185,10 @@ def test_fix_defaults_to_safe_and_says_what_it_held_back(base_url):
     assert lossy["after"]["counts"]["error"] < safe["after"]["counts"]["error"]
 
 
+EXAMPLES = pathlib.Path(__file__).resolve().parents[1] / "examples"
+EXAMPLE_BAD = (EXAMPLES / "bad-design.svg").read_text(encoding="utf-8")
+THIN = EXAMPLES / "thin-detail.svg"
+
 FOUR_COLOURS = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="12cm" height="12cm" viewBox="0 0 120 120">'
     '<g id="a"><path d="M0 0 L50 0 L50 50 Z" fill="#111111"/>'
@@ -192,21 +198,87 @@ FOUR_COLOURS = (
 )
 
 
-def test_the_browser_cannot_ask_for_a_destructive_fix(base_url):
-    """One tap must not delete artwork — that needs a typed command."""
+def test_there_is_no_destructive_setting_in_the_browser(base_url):
+    """A7's line: destructive repairs are reachable, but only by picking one.
+
+    A switch that quietly enables "delete artwork" for the whole run is the
+    thing that must not exist. A button that says what it deletes is fine —
+    better than a flag, because the consequence is written next to it.
+    """
     status, payload = post_json(
         base_url + "/api/fix", {"svg": BAD, "allow": "destructive"}
     )
     assert status == 400
-    assert "--allow destructive --only" in payload["error"]
+    assert "offered as a choice" in payload["error"]
 
     assert post_json(base_url + "/api/fix", {"svg": BAD, "allow": "reckless"})[0] == 400
+
+
+@pytest.mark.skipif(
+    default_backend() is None, reason="no path geometry backend installed"
+)
+def test_a_destructive_repair_that_asks_nothing_stays_out_of_the_browser(base_url):
+    """``geometry.min_feature_size`` deletes artwork and offers no choice."""
+    _, payload = post_json(
+        base_url + "/api/fix",
+        {"svg": THIN.read_text(encoding="utf-8"), "profile": "embroidery-strict"},
+    )
+    reasons = {skip["rule"]: skip["reason"] for skip in payload["skipped"]}
+    assert "only available from the command line" in reasons["geometry.min_feature_size"]
+    assert payload["after"]["passed"] is False
+
+
+def test_a_choice_can_reach_a_destructive_repair(base_url):
+    """...but one that *does* ask can be answered, and then it runs."""
+    _, offered = post_json(base_url + "/api/fix", {"svg": BAD})
+    questions = {ask["rule"]: ask for ask in offered["pending"]}
+    assert "element.forbidden" in questions
+    option = questions["element.forbidden"]["options"][0]
+    assert option["risk"] == "destructive"
+    assert "<text>" in option["label"]
+
+    _, answered = post_json(
+        base_url + "/api/fix",
+        {"svg": BAD, "choices": {"element.forbidden": option["key"]}},
+    )
+    applied = {fix["rule"]: fix for fix in answered["applied"]}
+    assert applied["element.forbidden"]["risk"] == "destructive"
+    assert applied["element.forbidden"]["chosen"]["key"] == option["key"]
+    assert "<text" not in answered["svg"]
+
+
+def test_answering_every_question_gets_the_broken_file_through(base_url):
+    """The point of the whole feature, end to end from the browser."""
+    _, payload = post_json(
+        base_url + "/api/fix",
+        {
+            "svg": EXAMPLE_BAD,
+            "allow": "lossy",
+            "choices": {
+                "color.no_gradients": "average",
+                "structure.color_layers": "colors",
+                "element.forbidden": "delete",
+                "path.closed": "close",
+            },
+        },
+    )
+    assert payload["before"]["passed"] is False
+    assert payload["after"]["passed"] is True
+    assert payload["ok"] is True and payload["pending"] == []
 
 
 def test_fix_rejects_the_same_bad_requests_as_check(base_url):
     assert post_json(base_url + "/api/fix", {"svg": ""})[0] == 400
     assert post_json(base_url + "/api/fix", {"svg": "not xml at all"})[0] == 400
     assert post_json(base_url + "/api/fix", {"svg": GOOD, "profile": "nope"})[0] == 400
+
+
+def test_the_page_renders_the_questions_as_buttons(base_url):
+    _, body = get(base_url + "/")
+    assert "renderAsk" in body
+    assert "answers[button.dataset.rule]" in body  # picking one re-runs the fix
+    assert ".opt.danger" in body  # a destructive answer is styled as one
+    assert "'destructive' ? 'danger'" in body
 
 
 def test_the_page_offers_the_fix_and_a_download(base_url):

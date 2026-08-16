@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence
 
 from ..profiles import load_profile
 from ..visual import Difference
-from .base import Risk, fixer_classes_for
+from .base import Risk, answer_from_mapping, fixer_classes_for
 from .engine import FixEngine
 
 
@@ -71,6 +71,7 @@ def verify_fixer(
     risk: Optional[Risk] = None,
     visual_budget: Optional[float] = None,
     extra_profiles: Sequence[str] = (),
+    choice: Optional[str] = None,
 ) -> FixVerification:
     """Run ``rule_id``'s fixer over ``source`` and check all four invariants.
 
@@ -78,6 +79,10 @@ def verify_fixer(
     there is nothing to prove and the verification reports that. When a rule has
     fixers at several risk levels, ``risk`` picks one; otherwise all of them run
     together, as they would in a real fix.
+
+    ``choice`` answers the fixer's question (A7), and each answer has to hold
+    the contract on its own — "keep the drawing order" claims to move no pixel
+    and is checked against a renderer for it, exactly like any other safe fix.
     """
     candidates = fixer_classes_for(rule_id)
     if risk is not None:
@@ -91,12 +96,16 @@ def verify_fixer(
     fixer_class = candidates[-1]  # the riskiest one actually in play
     result.risk = fixer_class.risk
 
+    # Naming an answer authorises whatever that answer costs: the point is to
+    # verify *this* option, and the report records the risk it turned out to be.
+    allow = list(Risk) if choice is not None else [cls.risk for cls in candidates]
     loaded = load_profile(profile)
     engine = FixEngine(
         loaded,
-        allow=[cls.risk for cls in candidates],
+        allow=allow,
         only={rule_id},
         visual_budget=visual_budget,
+        decide=answer_from_mapping({rule_id: choice}) if choice is not None else None,
     )
 
     report = engine.fix_source(source)
@@ -114,6 +123,8 @@ def verify_fixer(
         return result
 
     result.changed_file = report.changed
+    if report.applied:
+        result.risk = report.applied[-1].risk  # the option's risk, when one was picked
     if not report.applied:
         reasons = "; ".join(str(skip) for skip in report.skipped) or "no reason given"
         result.notes.append(f"the fixer declined to run ({reasons})")

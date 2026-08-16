@@ -97,23 +97,34 @@ def test_reduce_palette_leaves_small_palettes_alone():
 
 # -- several fixers per rule ------------------------------------------------
 
-def test_a_rule_can_have_a_safe_and_a_lossy_fix():
+def test_a_rule_can_have_a_fix_at_every_risk_level():
+    """``path.closed`` ended up with all three, and they escalate cleanly.
+
+    Safe closes what the fill already renders shut, lossy closes a gap small
+    enough to be a drawing slip, and destructive closes one wide enough that it
+    has to ask first (A7).
+    """
     from svg_embroidery.fixes import fixer_classes_for
 
     risks = [fixer.risk for fixer in fixer_classes_for("path.closed")]
-    assert risks == [Risk.SAFE, Risk.LOSSY]  # safest first
+    assert risks == [Risk.SAFE, Risk.LOSSY, Risk.DESTRUCTIVE]  # safest first
 
 
-def test_only_removing_artwork_is_destructive():
-    """A5 opened the top tier: deleting detail a needle cannot render.
+def test_the_destructive_tier_is_exactly_the_repairs_that_lose_artwork():
+    """Every one of them removes something the designer drew, and no other does.
 
-    Nothing else has earned it — every other repair either preserves the
-    picture or changes it within a declared budget.
+    A5 opened the tier with "cut detail too fine to stitch". A7 added two more,
+    both of which ask before running: deleting a forbidden element that is on
+    the canvas, and closing a gap wide enough that the segment is invented.
     """
     destructive = {
         fixer.rule_id for fixer in available_fixers() if fixer.risk is Risk.DESTRUCTIVE
     }
-    assert destructive == {"geometry.min_feature_size"}
+    assert destructive == {
+        "element.forbidden",
+        "geometry.min_feature_size",
+        "path.closed",
+    }
 
 
 def test_lossy_fixes_stay_out_of_a_default_run():

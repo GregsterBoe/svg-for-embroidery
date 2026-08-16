@@ -52,6 +52,8 @@ svgemb fix design.svg --dry-run                # the same, with a diff
 svgemb fix design.svg --allow lossy            # also repairs that change the design
 svgemb fix ./designs -r --in-place             # a whole folder (keeps each .svg.bak)
 svgemb fix design.svg --only color.max_count   # one rule at a time
+svgemb fix design.svg -I                       # answer its questions at the prompt
+svgemb fix design.svg --choose structure.color_layers=runs
 svgemb fix design.svg --stdout > fixed.svg     # for a pipe (the report goes to stderr)
 
 svgemb profiles                                # list all rulesets
@@ -105,8 +107,10 @@ with the phone offline. It shows a preview of the design, lets you switch
 rulesets to compare shops, and has a "copy report as text" button. A failing
 file also gets a **Fix what can be fixed** button: it lists what was repaired
 and what was left alone, shows the design before and after side by side, and
-offers the result as a download — your file is never modified in place.
-Repairs that delete artwork are deliberately command-line only. Pull down
+offers the result as a download — your file is never modified in place. Where a
+repair needs a decision, the choices appear as buttons saying what each one
+costs; that is the only way to reach a repair that deletes artwork, because
+there is no *setting* here that quietly switches one on. Pull down
 Termux's notification and tap **Acquire wakelock** if Android keeps killing the
 server in the background.
 
@@ -331,8 +335,55 @@ wrote fixed.svg
 the normal case — the remaining errors are the ones needing a human — so each is
 listed with the reason it was left: a decision only you can make, a risk level
 you didn't allow, or a package you can install. Nothing is written unless you
-say where (`-o`, `--in-place`, `--stdout`), and `--allow destructive` will not
-run at all until you name the rule with `--only`.
+say where (`-o`, `--in-place`, `--stdout`), `--in-place` keeps a `.bak`, and
+`--allow destructive` will not run until you name the rule.
+
+- **A7** — the repairs that **ask**. "No automatic fix available" is a dead end
+  for the cases that matter most: the shop wants one colour per layer and your
+  artwork has none, so *something* has to be regrouped, and only you know
+  whether the order things overlap in is load-bearing. So the tool states the
+  question and the answers it can carry out, and each answer prices itself:
+
+```
+❓ your call  structure.color_layers
+       2 colours (#000000, #c8102e) across 3 top-level shapes, in 3 runs of colour.
+       How should the colours be separated into layers?
+       * runs       Keep the drawing order — 3 layers  [safe]
+                    Wraps each run of same-coloured shapes, so 2 colours become 3
+                    layers and a colour may appear on more than one. Nothing is
+                    reordered: the design renders exactly as it does now.
+         colors     One layer per colour — 2 layers  [destructive]
+                    Exactly one layer per thread, which is what most shops' tooling
+                    expects. Shapes move past each other to get there, so wherever
+                    two colours overlap the one on top changes.
+       answer with: --choose structure.color_layers=runs|colors
+```
+
+Answer with `--choose rule.id=option`, or `-I` to be asked at the prompt, or by
+tapping the option in the web UI. Four rules ask so far:
+
+| Rule | The question | Answers |
+| --- | --- | --- |
+| `structure.color_layers` | how to separate the colours | keep the drawing order (safe) · one layer per colour (destructive) |
+| `color.no_gradients` | which flat colour replaces the ramp | its weighted average · its first stop (both lossy) |
+| `element.forbidden` | delete artwork the profile forbids | delete it (destructive) |
+| `path.closed` | close a gap too wide to be a slip | draw the segment (destructive) |
+
+Every answer is still a fix: it is held to the same four invariants, so *keep
+the drawing order* is checked against a renderer and really does move no pixel.
+And the run now repeats until it settles — flattening a gradient can push the
+palette back over the limit that was reduced two rules earlier, so a single pass
+would leave the file failing something the run itself broke.
+
+**The upshot:** `examples/bad-design.svg` was written to be unfixable, and with
+its four questions answered it passes.
+
+```bash
+svgemb fix examples/bad-design.svg --allow destructive \
+  --choose color.no_gradients=average --choose structure.color_layers=colors \
+  --choose element.forbidden=delete --choose path.closed=close
+# ❌ FAIL → ✅ PASS   9 → 0 error(s)
+```
 
 Check any of it against your own files:
 
@@ -372,7 +423,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 324 tests
+python -m pytest        # 353 tests
 ```
 
 Layout:
@@ -393,6 +444,7 @@ src/svg_embroidery/
   geometry.py      flattening (pure Python) + offsetting/booleans (roadmap A5)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
+                     safe.py / lossy.py / geometry.py / choices.py — the fixers
   server.py        stdlib-only web UI: check and fix (svgemb serve)
   cli.py           svgemb check / fix / roundtrip / doctor / serve
 ```

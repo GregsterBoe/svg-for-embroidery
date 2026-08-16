@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .checker import Checker
 from .document import SvgParseError
-from .fixes import FixEngine, FixerError, Risk, risks_up_to
+from .fixes import FixEngine, FixerError, Risk, answer_from_mapping, risks_up_to
 from .profiles import Profile, ProfileError, list_profiles, load_profile
 from .report import render_fix_text, render_text
 from .rules import RuleConfigError
@@ -31,8 +31,9 @@ from .rules import RuleConfigError
 #: Refuse absurd uploads; embroidery SVGs are tiny.
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
-#: The riskiest repair a browser tap may ask for. A destructive fix deletes
-#: artwork, which wants a typed command and a named rule, not a button.
+#: The riskiest repair a browser *setting* may switch on. Destructive repairs
+#: are still reachable, but only by picking one from a list that says what it
+#: costs — there is no switch that turns "delete artwork" on in the background.
 MAX_WEB_RISK = Risk.LOSSY
 #: An over-sized body is discarded in chunks (never buffered) so the client can
 #: finish sending and actually receive the error. Past this, drop the connection.
@@ -110,6 +111,17 @@ input[type=file] { display: none; }
                  color: var(--muted); text-align: center; margin-bottom: 5px; }
 .ba img { width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
 .stack > button { margin-top: 8px; }
+.ask { border: 1px solid var(--accent); border-radius: 12px; padding: 14px;
+       margin-bottom: 14px; background: var(--card); }
+.ask h3 { margin: 0 0 4px; font-size: 1rem; }
+.ask .ctx { color: var(--muted); font-size: .84rem; margin-bottom: 12px; }
+.opt { width: 100%; text-align: left; background: transparent; color: var(--fg);
+       border: 1px solid var(--line); font-weight: 400; margin-top: 8px; }
+.opt b { display: block; font-weight: 600; margin-bottom: 3px; }
+.opt small { color: var(--muted); display: block; margin-top: 4px; }
+.opt .risk { float: right; margin-left: 8px; }
+.opt.danger { border-color: var(--err); }
+.opt.danger .risk { color: var(--err); border-color: var(--err); }
 footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top: 20px; }
 </style>
 </head>
@@ -256,7 +268,30 @@ function render(report) {
       setTimeout(() => { $('copy').textContent = 'Copy report as text'; }, 1500);
     });
   });
-  if ($('fix')) $('fix').addEventListener('click', fix);
+  if ($('fix')) $('fix').addEventListener('click', () => {
+    answers = {};                       // a fresh run starts with no answers
+    lossyWanted = $('lossy').checked;
+    fix();
+  });
+}
+
+// Questions this file has already been answered, kept so that answering a
+// second one does not undo the first: every run replays all of them.
+let answers = {}, lossyWanted = false;
+
+function renderAsk(decision) {
+  const options = decision.options.map((o, index) => `
+    <button class="opt ${o.risk === 'destructive' ? 'danger' : ''}"
+            data-rule="${escapeHtml(decision.rule)}" data-key="${escapeHtml(o.key)}">
+      <span class="risk">${escapeHtml(o.risk)}</span>
+      <b>${o.recommended ? '★ ' : ''}${escapeHtml(o.label)}</b>
+      <small>${escapeHtml(o.detail)}</small>
+    </button>`).join('');
+  return `<div class="ask">
+    <h3>${escapeHtml(decision.question)}</h3>
+    <div class="ctx">${escapeHtml(decision.context)} <em>${escapeHtml(decision.rule)}</em></div>
+    ${options}
+  </div>`;
 }
 
 function fix() {
@@ -266,7 +301,8 @@ function fix() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       svg: lastSvg, filename: lastName, profile: $('profile').value,
-      strict: $('strict').checked, allow: $('lossy').checked ? 'lossy' : 'safe'
+      strict: $('strict').checked, allow: lossyWanted ? 'lossy' : 'safe',
+      choices: answers
     })
   })
   .then(async r => ({ok: r.ok, body: await r.json()}))
@@ -294,11 +330,17 @@ function renderFix(fix) {
       ${escapeHtml(fix.verification_error)}. Nothing is offered for download.</div>`;
   }
 
+  // The questions come first: they are the part that needs someone.
+  for (const decision of fix.pending) html += renderAsk(decision);
+
   html += '<div class="card">';
-  if (!fix.applied.length) html += '<p>Nothing could be repaired automatically.</p>';
+  if (!fix.applied.length && !fix.pending.length) {
+    html += '<p>Nothing could be repaired automatically.</p>';
+  }
   for (const f of fix.applied) {
     html += `<div class="f info"><div class="msg">✅ ${escapeHtml(f.rule)}
       <span class="risk">${escapeHtml(f.risk)}</span></div>` +
+      (f.chosen ? `<div class="hint">you chose: ${escapeHtml(f.chosen.label)}</div>` : '') +
       f.changes.map(c => `<div class="hint">${escapeHtml(c.description)}</div>`).join('') +
       '</div>';
   }
@@ -328,6 +370,14 @@ function renderFix(fix) {
   }
   $('fixout').innerHTML = html;
 
+  // Answering re-runs the whole fix from the original file, so a choice can be
+  // changed by choosing again rather than by starting over.
+  for (const button of document.querySelectorAll('.opt')) {
+    button.addEventListener('click', () => {
+      answers[button.dataset.rule] = button.dataset.key;
+      fix();
+    });
+  }
   if (fix.changed) {
     $('ba-before').src = dataUri(lastSvg);
     $('ba-after').src = dataUri(fix.svg);
@@ -491,15 +541,29 @@ class CheckRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 400,
                 {
-                    "error": "A destructive fix deletes artwork, so it is only available "
-                    "from the command line, one rule at a time: "
-                    "svgemb fix design.svg --allow destructive --only <rule.id>"
+                    "error": "There is no destructive *setting* here. A repair that "
+                    "deletes artwork is offered as a choice, with what it costs written "
+                    "next to it, and runs only when you pick it."
                 },
             )
             return
 
+        answers = data.get("choices")
+        if not isinstance(answers, dict):
+            answers = {}
+        answers = {str(key): str(value) for key, value in answers.items()}
+
         try:
-            report = FixEngine(profile, allow=allow).fix_source(source, path=path)
+            report = FixEngine(
+                profile,
+                allow=allow,
+                decide=answer_from_mapping(answers) if answers else None,
+                # Destructive repairs are reachable here, but only by picking
+                # one: ``ask_first`` offers them as answers and blocks any that
+                # would run on their own. The checkbox stays a safe/lossy
+                # switch, and nothing deletes artwork without being asked to.
+                ask_first=(Risk.DESTRUCTIVE,),
+            ).fix_source(source, path=path)
         except SvgParseError as exc:
             self._send_json(400, {"error": f"Could not parse SVG: {exc}"})
             return

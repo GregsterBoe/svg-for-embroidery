@@ -56,11 +56,13 @@ def test_the_gate_explains_precisely_what_it_cannot_fix(capsys):
 
     assert "✅ fixed    geometry.canvas_size  [safe]" in out
     assert "width 5cm -> 10cm" in out
-    # Each remaining rule is accounted for: nothing fails in silence.
-    for rule_id in ("color.max_count", "element.forbidden", "structure.color_layers"):
+    # Each remaining rule is accounted for: nothing fails in silence, and each
+    # is either a flag you can pass, a question you can answer, or a dead end.
+    for rule_id in ("color.max_count", "fill.required"):
         assert f"⏭ skipped  {rule_id}" in out
+    for rule_id in ("structure.color_layers", "element.forbidden", "path.closed"):
+        assert f"❓ your call  {rule_id}" in out
     assert "needs --allow lossy" in out
-    assert "would delete visible content" in out
     assert "no automatic fix available" in out
     assert "❌ FAIL → ❌ FAIL   9 → 6 error(s)" in out
     assert "still failing:" in out
@@ -169,8 +171,24 @@ def test_destructive_has_to_be_asked_for_by_name(capsys):
     assert "--only geometry.min_feature_size" in err
 
 
-def test_destructive_on_a_profile_that_has_none(capsys):
-    assert main(["fix", str(BAD), "--allow", "destructive"]) == 2
+def test_answering_a_question_names_the_rule_too(capsys):
+    """--choose is at least as explicit as --only, so it counts as naming."""
+    assert main(
+        [
+            "fix", str(BAD), "--allow", "destructive",
+            "--only", "element.forbidden",
+            "--choose", "element.forbidden=delete",
+        ]
+    ) == 1
+    out = capsys.readouterr().out
+    assert "✅ fixed    element.forbidden  [destructive]" in out
+    assert "deleted <text> from the artwork" in out
+
+
+def test_destructive_when_the_selected_rules_have_none(capsys):
+    assert main(
+        ["fix", str(BAD), "--allow", "destructive", "--only", "geometry.canvas_size"]
+    ) == 2
     assert "no rule in profile 'embroidery-basic' has a destructive fix" in (
         capsys.readouterr().err
     )
@@ -285,3 +303,58 @@ def test_a_verification_failure_is_its_own_exit_code(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "verification FAILED" in out
     assert "bug in svgemb, not in your file" in out
+
+
+# -- A7: answering questions from the command line --------------------------
+
+def test_an_open_question_prints_the_command_that_answers_it(capsys):
+    assert main(["fix", str(BAD)]) == 1
+    out = capsys.readouterr().out
+    assert "❓ your call  structure.color_layers" in out
+    assert "* colors" in out  # the recommended answer is starred
+    assert "answer with: --choose structure.color_layers=colors" in out
+    # A question whose answers all cost something names the flag as well.
+    assert "answer with: --allow lossy --choose color.no_gradients=average|first" in out
+
+
+def test_choose_takes_the_recommended_answer_when_left_empty(capsys):
+    assert main(["fix", str(BAD), "--choose", "structure.color_layers="]) == 1
+    out = capsys.readouterr().out
+    assert "✅ fixed    structure.color_layers  [safe]" in out
+
+
+def test_choose_wants_a_rule_and_an_option(capsys):
+    assert main(["fix", str(BAD), "--choose", "nonsense"]) == 2
+    assert "--choose wants RULE=OPTION" in capsys.readouterr().err
+
+
+def test_interactive_puts_the_question_to_the_terminal(monkeypatch, capsys):
+    asked = []
+
+    def answer(prompt):
+        asked.append(prompt)
+        return "colors"
+
+    monkeypatch.setattr("builtins.input", answer)
+    assert main(["fix", str(BAD), "-I"]) == 1
+    out = capsys.readouterr().out
+    assert asked and "choose (" in asked[0]
+    assert "✅ fixed    structure.color_layers" in out
+
+
+def test_interactive_accepts_a_refusal(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt: "skip")
+    assert main(["fix", str(BAD), "-I"]) == 1
+    out = capsys.readouterr().out
+    assert "✅ fixed    structure.color_layers" not in out
+    assert "❓ your call  structure.color_layers" in out  # still open, still shown
+
+
+def test_questions_reach_the_json_payload(capsys):
+    assert main(["fix", str(BAD), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)[0]
+    pending = {ask["rule"]: ask for ask in payload["pending"]}
+    layers = pending["structure.color_layers"]
+    assert layers["options"][0]["key"] == "colors"
+    assert layers["options"][0]["recommended"] is True
+    assert layers["context"].startswith("4 colours")

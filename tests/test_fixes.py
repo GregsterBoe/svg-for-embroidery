@@ -201,10 +201,13 @@ def test_only_filter_restricts_what_runs(registry):
 
 
 def test_rules_without_a_fixer_are_reported_as_such():
+    unfillable = TOO_MANY_COLOURS.replace(
+        "</g>", '<path d="M0 100 L20 100 L20 110 Z" fill="none"/></g>'
+    )
     engine = FixEngine.from_profile_name("embroidery-basic")
-    report = engine.fix_source(TOO_MANY_COLOURS)
+    report = engine.fix_source(unfillable)
     reasons = {skip.rule_id: skip.reason for skip in report.skipped}
-    assert reasons["structure.color_layers"] == "no automatic fix available"
+    assert reasons["fill.required"] == "no automatic fix available"
 
 
 # -- the engine polices its own output -------------------------------------
@@ -405,8 +408,7 @@ def test_the_report_serialises_for_a_machine():
     assert skipped["color.max_count"] == {
         "rule": "color.max_count", "risk": "lossy", "reason": "needs --allow lossy"
     }
-    # A rule with no fixer at all has no risk to report.
-    assert skipped["structure.color_layers"]["risk"] is None
+    assert payload["pending"] == []  # nothing here asks a question
     assert payload["before"]["counts"]["error"] == payload["after"]["counts"]["error"]
     assert payload["fixed_rules"] == [] and "color.max_count" in payload["remaining_rules"]
     assert "svg" not in payload and "diff" not in payload  # asked for neither

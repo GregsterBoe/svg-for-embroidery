@@ -168,6 +168,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--json", action="store_true", help="machine readable output")
 
+    bench = subparsers.add_parser(
+        "bench",
+        help="measure the image corpus and compare against the saved baseline (B1)",
+        description="Measure every image in the benchmark corpus against the profile it is "
+        "aimed at. With a baseline recorded, also report which numbers got better and "
+        "which got worse — the point of the whole exercise.",
+    )
+    bench.add_argument("--corpus", metavar="DIR", type=Path, help="corpus directory")
+    bench.add_argument(
+        "--only",
+        action="append",
+        metavar="NAME",
+        help="measure just this image (repeatable)",
+    )
+    bench.add_argument("--baseline", metavar="FILE", type=Path, help="baseline JSON to compare against")
+    bench.add_argument(
+        "--save", action="store_true", help="write this run to the baseline afterwards"
+    )
+    bench.add_argument(
+        "--no-compare", action="store_true", help="skip the baseline comparison"
+    )
+    bench.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="exit non-zero when any metric got worse (for CI)",
+    )
+    bench.add_argument(
+        "--work-side",
+        type=int,
+        metavar="N",
+        help="force the resolution the metrics run at; by default each image is "
+        "measured at whatever resolution makes its profile's minimum feature "
+        "a whole kernel wide",
+    )
+    bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
+    bench.add_argument("--json", action="store_true", help="machine readable output")
+    bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
+
     serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
     serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
     serve.add_argument(
@@ -610,6 +648,75 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bench(args: argparse.Namespace) -> int:
+    from . import bench as bench_module
+
+    if args.explain:
+        print(bench_module.render_metric_help())
+        return 0
+
+    color = not args.no_color
+    try:
+        entries = bench_module.load_corpus(args.corpus)
+    except bench_module.BenchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.only:
+        wanted = set(args.only)
+        unknown = wanted - {entry.name for entry in entries}
+        if unknown:
+            print(f"error: no such image(s): {', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+        entries = [entry for entry in entries if entry.name in wanted]
+
+    result = bench_module.run(
+        entries,
+        work_side=args.work_side,
+        corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
+    )
+
+    # A subset run must never overwrite a whole-corpus baseline with three rows.
+    baseline_path = args.baseline or bench_module.DEFAULT_BASELINE
+    changes = None
+    if not args.no_compare and Path(baseline_path).is_file():
+        try:
+            changes = bench_module.compare(bench_module.load_baseline(baseline_path), result)
+        except bench_module.BenchError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.only:  # only the rows we actually measured can have moved
+            changes = [change for change in changes if change.name in {e.name for e in entries}]
+
+    if args.json:
+        print(bench_module.render_json(result, changes))
+    else:
+        print(bench_module.render_table(result, color=color))
+        if changes is not None:
+            print()
+            print(bench_module.render_changes(changes, color=color))
+        elif not args.no_compare:
+            print(f"\nno baseline at {baseline_path} — record one with 'svgemb bench --save'")
+
+    if args.save:
+        if args.only:
+            print(
+                "error: refusing to save a baseline from a partial run; drop --only",
+                file=sys.stderr,
+            )
+            return 2
+        Path(baseline_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(baseline_path).write_text(
+            bench_module.render_json(result) + "\n", encoding="utf-8"
+        )
+        print(f"\nbaseline written to {baseline_path}", file=sys.stderr)
+
+    if args.fail_on_regression and changes:
+        if any(change.verdict == "worse" for change in changes):
+            return 1
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve  # imported lazily: only the CLI needs http.server
 
@@ -636,6 +743,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_roundtrip(args)
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "bench":
+        return _cmd_bench(args)
     if args.command == "serve":
         return _cmd_serve(args)
     parser.print_help()

@@ -25,6 +25,8 @@ corner.
 | **The profile is the spec** | Rules already encode what a shop wants. Fixers and the converter read their targets from the *same* profile — max colours becomes the quantiser's `k`, min stroke width becomes a morphology kernel, canvas size becomes output dimensions. No second source of truth. |
 | **Never destroy input** | Fixes write to a new file by default — in fact `svgemb fix` writes nothing at all without `-o`, `--in-place` or `--stdout`. `--in-place` requires an explicit flag and keeps a `.bak`. |
 | **Every step ends at a gate** | Each step below has a *done when* that can be checked by running something, not by opinion. If a gate fails, we stop and fix it rather than stacking the next step on top. |
+| **A measurement you can't take is not a failure** (A1, A5, A7, B1) | A missing renderer, geometry backend or image codec costs you a number, never the run. Added as a ground rule at B1, where it applies to a whole row of the benchmark rather than one check. |
+| **A metric that can't answer the question must not print a number** (B1) | Stricter than the rule above and learned the hard way: a thinness test at the wrong resolution silently asks a *different* question and quietly grades good artwork as junk. If the instrument can't answer, the cell stays empty and says why. |
 
 ---
 
@@ -729,7 +731,9 @@ and a command to drive all of it.
 
 The insight that shapes this phase: **quality comes from preprocessing, not from
 the tracer.** A great tracer on a bad mask gives a bad SVG. So most of the work
-below happens *before* anything is vectorised.
+below happens *before* anything is vectorised — and, since that claim is only
+worth acting on if it can be checked, the measuring instrument (B1) is built
+before the thing it measures.
 
 ### B0. Buy, don't build · size S
 
@@ -745,18 +749,81 @@ own corpus:
 **Done when:** a written spike comparing output on the corpus, with a decision
 and its reasoning recorded. Recommendation to beat: potrace, per colour layer.
 
-### B1. Corpus and metrics — **do this first** · size M
+**Ready to run:** B1 is cleared, so the corpus and the metrics to judge the
+candidates on both exist. Wire each candidate behind the `paths` column and let
+`svgemb bench` do the comparing — the `edges` column is already a prediction of
+path count, so the first real trace also tests whether that stand-in was honest.
+
+### B1. Corpus and metrics — **do this first** · ✅ CLEARED
 
 Without objective measurement, every later tweak is guesswork.
 
-**Do:** assemble ~20 images spanning the real range — flat logos, line art,
-scanned drawings, photos with backgrounds, transparent PNGs, gradients,
-low-resolution junk. For each, define the target profile and record: rendered
-difference vs. the quantised source, path count, colour count, and whether the
-result passes the profile.
+**Gate met.** `make bench` (`svgemb bench`) measures all twenty corpus images
+and, against a recorded baseline, reports which numbers got better and which got
+worse:
 
-**Done when:** `make bench` prints a table of all metrics for the whole corpus,
-and re-running it after a change shows what got better and what got worse.
+```
+1 better, 2 worse, 0 changed with no direction:
+  ❌ hatching  edges: 0.500 → 0.864
+  ❌ monogram  flat: 0.999 → 0.965
+  ✅ logo-two-colour  quant: 0.400 → 0.005
+```
+
+Grading requires knowing which way is up, so every column declares a direction
+in `METRICS`. `--fail-on-regression` turns that into an exit code for CI.
+
+**The corpus is generated, not collected** (`bench/make_corpus.py`), which buys
+three things: byte-identical output on every machine, so a metric that moves is
+the code moving; fixtures that can be *read* when a number looks wrong (what
+makes `line-art-thin` thin is a constant in that file); and no licence question.
+The cost, stated rather than hidden: generated images are cleaner than real
+ones, so this proves the metrics discriminate, not that they match human
+judgement on real scans. Real images can be dropped in alongside.
+
+| Column | Measures | Better |
+| --- | --- | --- |
+| `res` / `mm/px` | the resolution the row was measured at, and what a pixel is worth | — |
+| `colours` | distinct RGB values in the source | — |
+| `flat` | share of pixels identical to all four neighbours — how vector-like it is | higher |
+| `quant` | share of pixels changed by reducing to the profile's `k` | lower |
+| `edges` | share of pixels on a colour boundary — a stand-in for path count | lower |
+| `thin` | share of the image finer than this profile's needle | lower |
+| `paths` / `passes` | the traced SVG (B4/B6) — declared, still empty | lower / — |
+
+`paths` and `passes` are declared now precisely so the baseline grades them from
+the first run that fills them in, rather than needing the harness changed later.
+
+**Two findings worth carrying forward.**
+
+*The working resolution has to come from the profile, not from a constant.* At a
+fixed 128px the table said `line-art-thick` (5px strokes) was worse than
+`line-art-thin` (1px) — because at 0.78 mm/px the smallest kernel asks "thinner
+than 2.3 mm?" while the profile said 1.5 mm. The fix is `scale_for()`: pick the
+resolution that makes the profile's minimum feature a whole kernel wide, and
+when the source is too coarse to answer at all (`lowres-icon`, 3.1 mm/px), leave
+the cell empty with the reason. This is where the second ground rule above came
+from.
+
+*Flat colours must survive quantisation exactly.* Median cut represents a
+cluster by its mean, and a logo's antialiased rim drags that mean a few units
+off the brand colour — turning a 2% rim into a 20% "loss" and swamping every
+comparison. Where one colour owns most of its cluster it is now kept verbatim;
+only where none does (a photograph) is the mean right. Lloyd refinement was
+added alongside, because median cut alone cuts *inside* a colour holding more
+than half the image and leaves two rarer ones sharing an entry.
+
+**What the corpus says today**, and it is not flattering to the current
+pipeline: scans measure like junk. `scan-clean` is a line drawing on paper that
+any human would call convertible, and it scores `flat` 0.001 with 84% of the
+image "too thin" — because grain means no pixel equals its neighbour and the
+quantiser turns speckle into unstitchable detail. That is an accurate
+measurement of an *unpreprocessed* image, and it is exactly the gap B3's
+denoising stage exists to close. It is pinned by a test that should start
+failing when B3 lands.
+
+**Measuring a PNG needs nothing installed** — the pure-Python decoder A1 already
+carries doubles as the corpus reader. Pillow adds the other formats; without it
+a JPEG is a row you don't get, with the reason printed.
 
 ### B2. Suitability triage · size S
 
@@ -767,6 +834,14 @@ gradient smoothness, edge density, finest stroke; report *"this photo has 38,000
 colours and soft shading; at 3 colours expect heavy detail loss."*
 
 **Done when:** it correctly separates the corpus into good/marginal/hopeless.
+
+**Mostly built already.** B1's `bench.measure()` computes every one of those
+numbers, and the corpus manifest carries the human `expect` label to grade
+against. What B2 adds is the *verdict* — thresholds turning four ratios into one
+word — plus a sentence explaining it, and a single-file entry point. Note the
+honest complication B1 turned up: the current metrics score a clean scan as
+hopeless (see B1), so either B2's thresholds run after B3's preprocessing, or
+B2 ships knowing it under-rates scans and says so.
 
 ### B3. Preprocessing pipeline · size L
 
@@ -781,8 +856,16 @@ The heart of the phase. Each stage independently testable:
 6. **morphological open/close** — removes specks and bridges thinner than the
    profile's `stroke.min_width`, i.e. exactly the detail a needle can't render
 
+Stages 5 and 6 already exist in RGB, in `raster.py`, because B1's metrics needed
+them: `quantise()` (median cut + Lloyd, keeping dominant colours verbatim) and
+`thin_ratio()`'s opening. B3 replaces the quantiser with a Lab one for the
+*conversion* path; the measuring path stays dependency-free, and the baseline is
+what shows whether Lab was worth it.
+
 **Done when:** each stage has a before/after test on a fixture, and B1's metrics
-improve measurably versus tracing the raw image.
+improve measurably versus tracing the raw image. The specific number to move:
+`scan-clean` currently measures `flat` 0.001 and `thin` 0.84 — denoising should
+make a scanned line drawing measure like the flat artwork it is.
 
 ### B4. Layered tracing · size M
 
@@ -841,12 +924,19 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
+   ✅ CLEARED       │
 B0 tracer spike ────┤
 B2 triage ──────────┘
 ```
 
-A0/A1 and B0/B1/B2 are independent and can run in parallel. Everything else is
-a chain.
+A0/A1 are independent of each other, as are B0 and B2. B1 turned out *not* to be
+parallel with B0 after all: B0's gate is "a spike comparing output **on the
+corpus**", so the corpus has to exist first — which is also why the roadmap
+marks B1 "do this first" despite listing it second. Everything else is a chain.
+
+**Where Phase B stands:** B1 is done. B0 and B2 are both unblocked and can run
+in either order; B2's triage has its grading data ready in the corpus manifest's
+`expect` column.
 
 ## Risks, named up front
 

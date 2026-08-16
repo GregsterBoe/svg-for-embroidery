@@ -30,3 +30,6 @@ svg_embroidery = ["profiles/builtin/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: measures the whole benchmark corpus; deselect with -m 'not slow'",
+]

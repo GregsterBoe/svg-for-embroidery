@@ -391,6 +391,63 @@ Check any of it against your own files:
 svgemb roundtrip ~/designs -r
 ```
 
+### Phase B has started: images → SVG
+
+**B1 — the measuring instrument, built before the thing it measures.** The
+premise of Phase B is that quality comes from preprocessing, not from the
+tracer; that only pays off if preprocessing can be measured, so the benchmark
+comes first and the tracer gets fitted to it.
+
+```bash
+make bench          # or: svgemb bench
+```
+
+Twenty generated images — flat logos, line art, scans, photos, transparency,
+gradients, low-resolution junk — each measured against the profile it is aimed
+at:
+
+```
+image              kind      expect         size   res   mm/px   colours    k    flat   quant   edges    thin
+logo-two-colour    logo      good        256x256   200   0.500        12    3   0.957   0.005   0.025   0.003
+line-art-thick     line-art  good        256x256   200   0.500         5    3   0.889   0.002   0.069   0.013
+line-art-thin      line-art  marginal    256x256   200   0.500         5    3   0.918   0.001   0.060   0.030
+hatching           line-art  hopeless    256x256   200   0.500         8    3   0.047   0.382   0.864   0.993
+photo-portrait     photo     hopeless    256x256   200   0.500      1356    3   0.000   0.926   0.084   0.080
+lowres-icon        junk      marginal      32x32    32   3.125         2    3   0.753   0.000   0.138       ·
+```
+
+`flat` is how vector-like the image is, `quant` what reducing to the profile's
+colour budget costs, `edges` how much boundary a tracer must follow, `thin` how
+much of it is finer than that shop's needle. Each metric declares which
+direction is better, so the run grades itself against a saved baseline:
+
+```
+1 better, 2 worse, 0 changed with no direction:
+  ❌ hatching  edges: 0.500 → 0.864
+  ✅ logo-two-colour  quant: 0.400 → 0.005
+```
+
+Two things fell out of building it that are worth keeping:
+
+**The resolution has to come from the profile.** Measured at a fixed 128px, a
+5px stroke scored *worse* than a 1px one — at 0.78mm per pixel the smallest
+kernel asks "thinner than 2.3mm?" when the profile said 1.5mm, so it condemned
+strokes that stitch fine. Each image is now measured at whatever resolution
+makes the profile's minimum feature a whole kernel wide. When the source is too
+coarse to answer at all — `lowres-icon`, at 3.1mm per pixel — the cell is empty
+and says why, rather than printing a number that means something else.
+
+**A flat colour has to survive quantisation exactly.** Representing a colour
+cluster by its mean is the textbook answer and it is wrong here: a logo's
+antialiased rim drags the entry a few units off the brand colour, and then every
+pixel of the logo counts as changed. A 2% rim became a 20% loss. Where one
+colour dominates its cluster it is now kept verbatim; only where none does —
+a photograph — is the mean right.
+
+The columns for path count and "does it pass" are declared but empty: there is
+no tracer yet (B0 picks one, B4 wires it in). They are declared now so the
+baseline can grade them from the first run that fills them in.
+
 ### Optional capabilities
 
 The checker needs nothing but the standard library and PyYAML. Heavier work is
@@ -404,6 +461,11 @@ and what to install:
 | Rendering | visual regression, before/after previews | `pkg install librsvg` (Termux), `apt install librsvg2-bin`, or `pip install cairosvg` |
 | Path geometry | stroke → outline, minimum feature size | `pip install "svg-for-embroidery[geometry]"` |
 | Raster | image → SVG conversion | `pip install "svg-for-embroidery[convert]"` + potrace |
+
+Measuring a **PNG** needs nothing at all — the pure-Python decoder the visual
+harness already carries doubles as the corpus reader, so `svgemb bench` works on
+a bare install. Pillow adds every other image format; without it a JPEG is a row
+you don't get, with the reason printed, and the sweep continues.
 
 There is deliberately **no separate mobile edition** — see the decision in
 [`docs/ROADMAP.md`](docs/ROADMAP.md). When a phone can't run a heavy step, run
@@ -423,7 +485,9 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 358 tests
+make test         # 403 tests
+make degraded     # the same suite with every optional extra switched off
+make bench        # measure the image corpus against the baseline
 ```
 
 Layout:
@@ -442,9 +506,15 @@ src/svg_embroidery/
   roundtrip.py     proof that read -> write changes nothing (roadmap A0)
   visual.py        render + compare images; pure-Python PNG (roadmap A1)
   geometry.py      flattening (pure Python) + offsetting/booleans (roadmap A5)
+  raster.py        reading images, quantising, measuring them (roadmap B1)
+  bench.py         the corpus sweep and the baseline diff (roadmap B1)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
                      safe.py / lossy.py / geometry.py / choices.py — the fixers
   server.py        stdlib-only web UI: check and fix (svgemb serve)
-  cli.py           svgemb check / fix / roundtrip / doctor / serve
+  cli.py           svgemb check / fix / roundtrip / doctor / bench / serve
+bench/
+  make_corpus.py   generates the 20-image corpus, deterministically
+  corpus/          the images and their manifest
+  baseline.json    the numbers to beat
 ```

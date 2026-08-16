@@ -163,6 +163,17 @@ def _installed_geometry():
     return [backend.name for backend in available_backends()]
 
 
+def _installed_image_readers():
+    """And for reading images, so ``SVGEMB_NO_RASTER=1`` shows up in doctor.
+
+    Only the labels this capability declares are returned; the built-in PNG
+    decoder is always there and is not something to install.
+    """
+    from .raster import pillow_available
+
+    return (["Pillow"] if pillow_available() else []) + ["potrace"]
+
+
 CAPABILITIES: Sequence[Capability] = (
     Capability(
         key="core",
@@ -214,12 +225,18 @@ CAPABILITIES: Sequence[Capability] = (
     Capability(
         key="raster",
         title="Raster conversion",
-        enables="turning PNG/JPG images into embroidery-ready SVG",
+        # PNG is measurable with nothing installed — the decoder the visual
+        # harness already needs doubles as the corpus reader — so 'svgemb bench'
+        # works on a bare install. Pillow adds every other format, potrace does
+        # the tracing.
+        enables="turning PNG/JPG images into embroidery-ready SVG (PNG measuring "
+        "needs nothing)",
         requirements=(
             Requirement("Pillow", "module", "PIL", distribution="Pillow"),
             Requirement("potrace", "command", "potrace"),
         ),
         mode="all",
+        probe=_installed_image_readers,
         hints={
             "termux": "pkg install python-pillow potrace",
             "linux": 'apt install potrace && pip install "svg-for-embroidery[convert]"',

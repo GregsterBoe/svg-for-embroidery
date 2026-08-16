@@ -141,3 +141,77 @@ def test_oversized_body_is_rejected(base_url):
         urllib.request.urlopen(request, timeout=10)
     assert exc.value.code == 400
     assert "too large" in json.loads(exc.value.read().decode("utf-8"))["error"]
+
+
+# -- A6: fixing from the browser -------------------------------------------
+
+FIXABLE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="5cm" height="5cm">\n'
+    '  <g id="a"><path d="M10 10 L40 10 L40 40 L10 40 Z" fill="#000000"/></g>\n'
+    "</svg>\n"
+)
+
+
+def test_fix_returns_the_repaired_file_and_the_reasoning(base_url):
+    status, payload = post_json(
+        base_url + "/api/fix", {"svg": FIXABLE, "filename": "small.svg"}
+    )
+    assert status == 200
+    assert payload["ok"] is True and payload["changed"] is True
+
+    fixed = {fix["rule"] for fix in payload["applied"]}
+    assert "geometry.canvas_size" in fixed
+    assert payload["before"]["passed"] is False
+    assert payload["after"]["passed"] is True
+    assert "viewBox=" in payload["svg"]
+    assert payload["diff"].startswith("--- a/small.svg")
+    assert "✅ fixed" in payload["text"]
+
+    # What comes back is what the browser will download: re-checking it agrees.
+    _, rechecked = post_json(base_url + "/api/check", {"svg": payload["svg"]})
+    assert rechecked["passed"] is True
+
+
+def test_fix_defaults_to_safe_and_says_what_it_held_back(base_url):
+    _, safe = post_json(base_url + "/api/fix", {"svg": FOUR_COLOURS})
+    skipped = {skip["rule"]: skip for skip in safe["skipped"]}
+    assert skipped["color.max_count"]["reason"] == "needs --allow lossy"
+    assert skipped["color.max_count"]["risk"] == "lossy"
+
+    _, lossy = post_json(base_url + "/api/fix", {"svg": FOUR_COLOURS, "allow": "lossy"})
+    assert "color.max_count" in {fix["rule"] for fix in lossy["applied"]}
+    assert lossy["after"]["counts"]["error"] < safe["after"]["counts"]["error"]
+
+
+FOUR_COLOURS = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12cm" height="12cm" viewBox="0 0 120 120">'
+    '<g id="a"><path d="M0 0 L50 0 L50 50 Z" fill="#111111"/>'
+    '<path d="M50 0 L100 0 L100 50 Z" fill="#222222"/>'
+    '<path d="M0 50 L50 50 L50 100 Z" fill="#333333"/>'
+    '<path d="M50 50 L100 50 L100 100 Z" fill="#444444"/></g></svg>'
+)
+
+
+def test_the_browser_cannot_ask_for_a_destructive_fix(base_url):
+    """One tap must not delete artwork — that needs a typed command."""
+    status, payload = post_json(
+        base_url + "/api/fix", {"svg": BAD, "allow": "destructive"}
+    )
+    assert status == 400
+    assert "--allow destructive --only" in payload["error"]
+
+    assert post_json(base_url + "/api/fix", {"svg": BAD, "allow": "reckless"})[0] == 400
+
+
+def test_fix_rejects_the_same_bad_requests_as_check(base_url):
+    assert post_json(base_url + "/api/fix", {"svg": ""})[0] == 400
+    assert post_json(base_url + "/api/fix", {"svg": "not xml at all"})[0] == 400
+    assert post_json(base_url + "/api/fix", {"svg": GOOD, "profile": "nope"})[0] == 400
+
+
+def test_the_page_offers_the_fix_and_a_download(base_url):
+    _, body = get(base_url + "/")
+    assert "Fix what can be fixed" in body
+    assert "api/fix" in body
+    assert "Download the fixed SVG" in body
+    assert "URL.createObjectURL" in body  # the download never leaves the device

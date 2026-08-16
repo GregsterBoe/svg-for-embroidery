@@ -147,6 +147,23 @@ def available_fixers() -> List[Type[Fixer]]:
     return [cls for key in sorted(_FIXERS) for cls in _FIXERS[key]]
 
 
+def risks_up_to(level) -> "frozenset[Risk]":
+    """Every risk at or below ``level`` — what ``--allow lossy`` means.
+
+    Allowing a level implies the safer ones: nobody asking for lossy repairs
+    wants the safe ones withheld. Picking one level rather than a set is also
+    what makes the flag readable as a *ceiling*, which is how people reason
+    about it.
+    """
+    if not isinstance(level, Risk):
+        try:
+            level = Risk(str(level).strip().lower())
+        except ValueError:
+            allowed = ", ".join(risk.value for risk in Risk)
+            raise FixerError(f"unknown risk level '{level}' (use: {allowed})") from None
+    return frozenset(risk for risk in Risk if risk.rank <= level.rank)
+
+
 def parse_risks(values) -> "frozenset[Risk]":
     """Turn ``["safe", "lossy"]`` into a risk set, raising on nonsense."""
     risks = set()

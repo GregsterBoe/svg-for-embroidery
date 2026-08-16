@@ -23,6 +23,7 @@ from .base import (  # noqa: F401
     fixer_classes_for,
     parse_risks,
     register_fixer,
+    risks_up_to,
 )
 from .engine import AppliedFix, FixEngine, FixReport, SkippedFix  # noqa: F401
 from .verify import FixVerification, verify_fixer, verify_no_op  # noqa: F401
@@ -47,6 +48,7 @@ __all__ = [
     "fixer_classes_for",
     "parse_risks",
     "register_fixer",
+    "risks_up_to",
     "verify_fixer",
     "verify_no_op",
 ]

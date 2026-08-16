@@ -43,7 +43,7 @@ machine):
 | **Core** — check, write, round-trip, fix, web UI | stdlib + PyYAML | Yes, always | n/a |
 | **Rendering** (A1) — visual regression, previews | any of `rsvg-convert`, `resvg`, Inkscape, `cairosvg` | Yes — `pkg install librsvg` | comparisons are skipped, nothing fails |
 | **Raster** (B3+) — image → SVG | Pillow + potrace | Yes — `pkg install python-pillow potrace` | conversion unavailable |
-| **Path geometry** (A5) — offsetting, booleans | shapely or pyclipper | **Maybe** — needs GEOS and a compiler; the one fragile tier | stroke→outline and min-feature-size unavailable |
+| **Path geometry** (A5) — offsetting, booleans | shapely (A5 picked one stack, not two) | **Maybe** — needs GEOS and a compiler; the one fragile tier | stroke→outline and min-feature-size unavailable |
 
 So only *one* tier is genuinely at risk on mobile, and only for two features.
 That is nowhere near enough to justify maintaining two versions of a checker
@@ -231,8 +231,8 @@ Two things worth recording:
 One reference fixer ships with it — `geometry.require_viewbox`, which adds the
 viewBox the renderer already assumed. End to end it produces a **one-line diff**
 (A0's verbatim spans) and **zero pixels changed** (A1's harness). The batch of
-safe fixes is A3; the `svgemb fix` command is A6. Until then `svgemb rules`
-marks which rules are fixable and at what risk.
+safe fixes is A3; `svgemb fix` drives all of them from A6. `svgemb rules` marks
+which rules are fixable and at what risk.
 
 <details>
 <summary>Original plan for this step</summary>
@@ -512,7 +512,97 @@ new min-feature check finds the defect in a purpose-built test file.
 > needs it anyway to stop neighbouring colour masks leaving hairline seams. It
 > is left there rather than done twice.
 
-### A6. Surfacing it · size S
+### A6. Surfacing it · ✅ CLEARED
+
+Everything A2–A5 built, behind one command and one button. No new fixing
+machinery: `FixEngine` already did the work, and A6 is the decision about *what
+the user is shown and what they have to say out loud first.*
+
+**The skip list is the product.** The gate file makes the point better than any
+argument: `examples/bad-design.svg` has nine errors and **cannot** be made to
+pass, because most of them are decisions no tool may make for you — live text
+that is part of the artwork, a gradient something still references, a 15 mm gap
+in a contour. So the run's job is not "fix everything", it is *account for
+everything*. Each rule left failing is printed with the reason it was left:
+
+```
+⏭ skipped  color.max_count  [lossy]
+       needs --allow lossy
+⏭ skipped  element.forbidden  [safe]
+       <text> are part of the artwork; removing them would delete visible
+       content, so that is a manual decision
+⏭ skipped  path.closed  [lossy]
+       1 contour(s) have gaps wider than 1 mm; closing them would invent
+       artwork, so that is a manual decision
+```
+
+Three different kinds of news — a flag you can pass, a decision you have to
+make, a limit you can raise — and none of them is "it didn't work".
+
+**A missing package is now visible without reading the source.** This was the
+one item A5 left dangling. A rule with no capability behind it reports
+`measured=False` and stays INFO, which meant the file passed *and never
+mentioned* that a check had not run. Now `Report.unmeasured` pulls those out and
+both commands surface them: `fix` prints them in the same list as the skips
+(they are the same kind of news, and the most actionable one — an install fixes
+it), and plain `check` shows them even without `-v`, with the count broken out
+of the verdict line so "9 checks passed" never quietly includes one that didn't
+happen. On a bare machine `svgemb fix examples/thin-detail.svg -p
+embroidery-strict` prints exactly one line, and it is the `pip install`.
+
+**Three things have to be said out loud.**
+
+- *Where the output goes.* Nothing is written without `-o`, `--in-place` or
+  `--stdout`; a bare `svgemb fix` is a preview. The alternative — defaulting to
+  in-place — contradicts the project's own ground rule about never destroying
+  input, for the sake of saving four characters. `--in-place` itself keeps the
+  original as `FILE.bak` (`--no-backup` to opt out), which is the rest of that
+  ground rule and was easy to forget until it was written down as a test.
+- *Which risk ceiling.* `--allow lossy` is a **ceiling**, not a set: it implies
+  safe, because nobody asking for lossy repairs wants the safe ones withheld.
+- *Which destructive rule.* `--allow destructive` on its own is refused, with
+  the exact flag to type instead. A2's docstring always said destructive fixes
+  are "asked for explicitly, per rule"; without this the flag would have meant
+  "do anything at all to make this pass", which is not a wish anyone can grant
+  responsibly. The web UI does not offer the level at all — one tap must not
+  delete artwork — and says so with the command to run instead.
+
+**Exit code 3.** `1` means your file still has errors, which is ordinary and
+expected. A verification failure is a different event entirely: the engine
+caught *its own output* misbehaving, wrote nothing, and the bug is ours. Folding
+that into `1` would hide the only exit code that means "stop and report this".
+
+**The web UI** gained `POST /api/fix` alongside `/api/check` (shared body,
+profile and error handling; the route split is the only change to the existing
+path), a **Fix what can be fixed** button on any failing report, the applied /
+skipped / not-measured lists, a before-and-after preview pair, and a download
+built from a `Blob` — so the fixed file never touches the server's disk and
+never leaves the device. There is also *Keep going from the fixed file*, which
+feeds the result back through the checker, since the realistic loop is fix, look,
+allow one more level, look again.
+
+**Two inconsistencies fixed on the way through, both found by looking at output
+rather than at code:**
+
+- The engine kept escalating through a rule's fixers after one of them had
+  already satisfied it, so a run could report `skipped: needs --allow lossy`
+  about a rule it had just finished fixing. It now stops at the first fixer that
+  clears the rule — reusing the re-check it was already doing for the regression
+  test, so this costs nothing.
+- `--no-color` stripped icons from the per-file report but not from the
+  multi-file summary, which is where a CI log actually looks. Both go through
+  `_strip_icons` now (a pre-existing bug in `check`, not something A6 added).
+
+**Done when** — `svgemb fix examples/bad-design.svg` turns a failing file into a
+passing one, ✅ *or explains precisely why it can't*: the six rules it cannot
+fix each print a reason, and `--allow lossy` moves the count from 9 errors to 4
+without touching one of them. The other half of the bar is the destructive path:
+`svgemb fix examples/thin-detail.svg -p embroidery-strict --allow destructive
+--only geometry.min_feature_size` takes A5's gate file from ❌ 3 errors to
+✅ PASS, and the re-check of the written file agrees.
+
+<details>
+<summary>Original plan for this step</summary>
 
 - CLI: `svgemb fix design.svg -p myshop -o fixed.svg`, `--dry-run` (show a diff
   and the risk of each change), `--allow lossy` / `--allow destructive`,
@@ -525,6 +615,8 @@ new min-feature check finds the defect in a purpose-built test file.
 
 **Done when:** `svgemb fix examples/bad-design.svg` turns a failing file into a
 passing one, or explains precisely why it can't.
+
+</details>
 
 ### Explicitly *not* in Phase A
 
@@ -544,8 +636,10 @@ fixer since, via `verify_fixer()`), and ~~A5 has a working geometry layer~~ ✅.
 Phase B leans on all four — starting early means debugging a tracer and a broken
 writer at the same time.
 
-**The gate is clear.** A6 is the only step of Phase A left, and it is surfacing
-work rather than machinery: nothing in Phase B waits on it.
+**The gate is clear, and Phase A is complete.** Every step A0–A6 is done, so
+Phase B starts with a writer that doesn't damage files, a way to measure whether
+an image changed, a fix protocol that verifies its own work, a geometry backend,
+and a command to drive all of it.
 
 ---
 

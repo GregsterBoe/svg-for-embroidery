@@ -24,7 +24,7 @@ import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 #: Rendered width used for comparisons. Big enough to show a thin stroke
 #: changing, small enough that a pure-Python decode stays quick.
@@ -232,6 +232,18 @@ class Difference:
     def within(self, budget: float) -> bool:
         """True when at most ``budget`` (0-1) of the image changed."""
         return self.ratio <= budget
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "changed_pixels": self.changed_pixels,
+            "total_pixels": self.total_pixels,
+            "ratio": self.ratio,
+            "max_delta": self.max_delta,
+            "mean_delta": self.mean_delta,
+            "identical": self.identical,
+            "note": self.note,
+            "text": str(self),
+        }
 
     def __str__(self) -> str:
         if self.identical:

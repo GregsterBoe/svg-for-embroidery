@@ -261,7 +261,6 @@ def _serialize_body(
     resolver: _PrefixResolver,
     root_tag: Optional[Tuple[str, bool]],
 ) -> str:
-    fmt = doc.format
     root = doc.root
     verbatim = doc.verbatim
     children = list(root)

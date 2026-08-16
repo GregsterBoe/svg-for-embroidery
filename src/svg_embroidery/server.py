@@ -7,6 +7,11 @@ Endpoints:
     GET  /               the single-page UI (self contained, works offline)
     GET  /api/profiles   available rulesets
     POST /api/check      {svg, filename, profile, strict} -> report JSON
+    POST /api/fix        {svg, filename, profile, strict, allow} -> fix report JSON
+
+Nothing here writes to disk. A fix comes back in the response and the browser
+decides whether to download it — the file on the user's phone is never the thing
+being edited.
 """
 
 from __future__ import annotations
@@ -18,12 +23,17 @@ from typing import Any, Dict, Optional, Tuple
 
 from .checker import Checker
 from .document import SvgParseError
-from .profiles import ProfileError, list_profiles, load_profile
-from .report import render_text
+from .fixes import FixEngine, FixerError, Risk, risks_up_to
+from .profiles import Profile, ProfileError, list_profiles, load_profile
+from .report import render_fix_text, render_text
 from .rules import RuleConfigError
 
 #: Refuse absurd uploads; embroidery SVGs are tiny.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+#: The riskiest repair a browser tap may ask for. A destructive fix deletes
+#: artwork, which wants a typed command and a named rule, not a button.
+MAX_WEB_RISK = Risk.LOSSY
 #: An over-sized body is discarded in chunks (never buffered) so the client can
 #: finish sending and actually receive the error. Past this, drop the connection.
 DRAIN_LIMIT = 32 * 1024 * 1024
@@ -92,6 +102,14 @@ input[type=file] { display: none; }
 .preview { text-align: center; background: #fff; border-radius: 9px; padding: 12px; }
 .preview img { max-width: 100%; max-height: 240px; }
 .hidden { display: none; }
+.risk { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+        border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; color: var(--muted); }
+.ba { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ba figure { margin: 0; }
+.ba figcaption { font-size: .74rem; text-transform: uppercase; letter-spacing: .04em;
+                 color: var(--muted); text-align: center; margin-bottom: 5px; }
+.ba img { width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
+.stack > button { margin-top: 8px; }
 footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top: 20px; }
 </style>
 </head>
@@ -123,6 +141,7 @@ footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top:
 </div>
 
 <div id="out"></div>
+<div id="fixout"></div>
 <footer>svgemb &middot; running locally on your device</footer>
 
 <script>
@@ -164,15 +183,20 @@ function load(file) {
   reader.onload = () => {
     lastSvg = reader.result;
     // Rendered as an <img> data URI: scripts inside the file cannot run.
-    $('preview').src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(lastSvg)));
+    $('preview').src = dataUri(lastSvg);
     $('preview-box').classList.remove('hidden');
     check();
   };
   reader.readAsText(file);
 }
 
+function dataUri(svg) {
+  return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+}
+
 function check() {
   $('out').innerHTML = '<div class="card">Checking…</div>';
+  $('fixout').innerHTML = '';
   fetch('api/check', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -212,7 +236,19 @@ function render(report) {
       ${f.hint && f.severity !== 'info' ? `<div class="hint">→ ${escapeHtml(f.hint)}</div>` : ''}
     </div>`;
   }
-  html += '</div><button class="secondary" id="copy">Copy report as text</button>';
+  html += '</div>';
+  if (!report.passed || c.warning) {
+    html += `<div class="card stack">
+      <div class="row">
+        <input type="checkbox" id="lossy" style="width:auto">
+        <label for="lossy">Also allow repairs that change the design</label>
+      </div>
+      <button id="fix">Fix what can be fixed</button>
+      <div class="desc">Your file is never modified — you get a new one to download.
+        Repairs that delete artwork are command-line only.</div>
+    </div>`;
+  }
+  html += '<button class="secondary" id="copy">Copy report as text</button>';
   $('out').innerHTML = html;
   $('copy').addEventListener('click', () => {
     navigator.clipboard.writeText(report.text).then(() => {
@@ -220,6 +256,101 @@ function render(report) {
       setTimeout(() => { $('copy').textContent = 'Copy report as text'; }, 1500);
     });
   });
+  if ($('fix')) $('fix').addEventListener('click', fix);
+}
+
+function fix() {
+  $('fixout').innerHTML = '<div class="card">Fixing…</div>';
+  fetch('api/fix', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      svg: lastSvg, filename: lastName, profile: $('profile').value,
+      strict: $('strict').checked, allow: $('lossy').checked ? 'lossy' : 'safe'
+    })
+  })
+  .then(async r => ({ok: r.ok, body: await r.json()}))
+  .then(({ok, body}) => {
+    if (!ok) {
+      $('fixout').innerHTML = `<div class="verdict fail">${escapeHtml(body.error)}</div>`;
+      return;
+    }
+    renderFix(body);
+  })
+  .catch(err => {
+    $('fixout').innerHTML = `<div class="verdict fail">${escapeHtml(String(err))}</div>`;
+  });
+}
+
+function renderFix(fix) {
+  const before = fix.before, after = fix.after;
+  let html = `<div class="verdict ${after.passed ? 'pass' : 'fail'}">
+    ${before.passed ? '✅' : '❌'} → ${after.passed ? '✅ PASS' : '❌ FAIL'} —
+    ${before.counts.error} → ${after.counts.error} error(s),
+    ${before.counts.warning} → ${after.counts.warning} warning(s)</div>`;
+
+  if (!fix.ok) {
+    html += `<div class="verdict fail">svgemb caught its own output misbehaving:
+      ${escapeHtml(fix.verification_error)}. Nothing is offered for download.</div>`;
+  }
+
+  html += '<div class="card">';
+  if (!fix.applied.length) html += '<p>Nothing could be repaired automatically.</p>';
+  for (const f of fix.applied) {
+    html += `<div class="f info"><div class="msg">✅ ${escapeHtml(f.rule)}
+      <span class="risk">${escapeHtml(f.risk)}</span></div>` +
+      f.changes.map(c => `<div class="hint">${escapeHtml(c.description)}</div>`).join('') +
+      '</div>';
+  }
+  for (const s of fix.skipped) {
+    html += `<div class="f warning"><div class="msg">⏭ ${escapeHtml(s.rule)}
+      ${s.risk ? `<span class="risk">${escapeHtml(s.risk)}</span>` : ''}</div>
+      <div class="hint">${escapeHtml(s.reason)}</div></div>`;
+  }
+  for (const u of fix.unmeasured) {
+    html += `<div class="f"><div class="msg">ℹ️ ${escapeHtml(u.rule)}</div>
+      <div class="hint">${escapeHtml(u.message)}</div></div>`;
+  }
+  html += `<div class="desc">${fix.visual
+    ? escapeHtml(fix.visual.text)
+    : 'No renderer on this machine, so the change was not measured against the image.'}</div>`;
+  html += '</div>';
+
+  if (fix.changed) {
+    html += `<div class="card"><div class="ba">
+      <figure><figcaption>before</figcaption><img id="ba-before" alt="before"></figure>
+      <figure><figcaption>after</figcaption><img id="ba-after" alt="after"></figure>
+    </div></div>`;
+  }
+  if (fix.ok && fix.changed) {
+    html += '<div class="stack"><button id="download">Download the fixed SVG</button>' +
+            '<button class="secondary" id="usefix">Keep going from the fixed file</button></div>';
+  }
+  $('fixout').innerHTML = html;
+
+  if (fix.changed) {
+    $('ba-before').src = dataUri(lastSvg);
+    $('ba-after').src = dataUri(fix.svg);
+  }
+  if ($('download')) {
+    $('download').addEventListener('click', () => download(fix.svg));
+    $('usefix').addEventListener('click', () => {
+      lastSvg = fix.svg;
+      $('preview').src = dataUri(lastSvg);
+      check();
+    });
+  }
+}
+
+function download(svg) {
+  const url = URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = (lastName || 'design.svg').replace(/(\\.svg)?$/i, '') + '-fixed.svg';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function escapeHtml(s) {
@@ -301,41 +432,80 @@ class CheckRequestHandler(BaseHTTPRequestHandler):
     do_HEAD = do_GET  # noqa: N815
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?", 1)[0].rstrip("/") != "/api/check":
+        route = self.path.split("?", 1)[0].rstrip("/")
+        if route not in ("/api/check", "/api/fix"):
             self._send_json(404, {"error": "not found"})
             return
 
+        request = self._read_request()
+        if isinstance(request, str):
+            self._send_json(400, {"error": request})
+            return
+        source, path, profile, strict, data = request
+
+        if route == "/api/check":
+            self._do_check(source, path, profile, strict)
+        else:
+            self._do_fix(source, path, profile, strict, data)
+
+    def _read_request(self):
+        """Everything both routes need, or an error string."""
         data, error = self._read_json()
         if error:
-            self._send_json(400, {"error": error})
-            return
+            return error
         assert data is not None
 
         source = data.get("svg")
         if not isinstance(source, str) or not source.strip():
-            self._send_json(400, {"error": "no SVG content received"})
-            return
+            return "no SVG content received"
 
-        strict = bool(data.get("strict"))
-        filename = str(data.get("filename") or "design.svg")
-        # Only the name matters for file.extension; never touch the filesystem.
-        path = Path(Path(filename).name)
-
+        # Only the name matters, for file.extension; never touch the filesystem.
+        path = Path(Path(str(data.get("filename") or "design.svg")).name)
         try:
             # Loaded per request so edits to a profile YAML take effect at once.
-            checker = Checker(load_profile(str(data.get("profile") or "embroidery-basic")))
+            profile = load_profile(str(data.get("profile") or "embroidery-basic"))
+            Checker(profile)  # surfaces a bad parameter as a message, not a 500
         except (ProfileError, RuleConfigError) as exc:
+            return str(exc)
+        return source, path, profile, bool(data.get("strict")), data
+
+    def _do_check(self, source: str, path: Path, profile: Profile, strict: bool) -> None:
+        try:
+            report = Checker(profile).check_source(source, path=path)
+        except SvgParseError as exc:
+            self._send_json(400, {"error": f"Could not parse SVG: {exc}"})
+            return
+        payload = report.to_dict(strict=strict)
+        payload["text"] = render_text(report, strict=strict, verbose=True)
+        self._send_json(200, payload)
+
+    def _do_fix(
+        self, source: str, path: Path, profile: Profile, strict: bool, data: Dict[str, Any]
+    ) -> None:
+        try:
+            allow = risks_up_to(data.get("allow") or Risk.SAFE.value)
+        except FixerError as exc:
             self._send_json(400, {"error": str(exc)})
+            return
+        if any(risk.rank > MAX_WEB_RISK.rank for risk in allow):
+            self._send_json(
+                400,
+                {
+                    "error": "A destructive fix deletes artwork, so it is only available "
+                    "from the command line, one rule at a time: "
+                    "svgemb fix design.svg --allow destructive --only <rule.id>"
+                },
+            )
             return
 
         try:
-            report = checker.check_source(source, path=path)
+            report = FixEngine(profile, allow=allow).fix_source(source, path=path)
         except SvgParseError as exc:
             self._send_json(400, {"error": f"Could not parse SVG: {exc}"})
             return
 
-        payload = report.to_dict(strict=strict)
-        payload["text"] = render_text(report, strict=strict, verbose=True)
+        payload = report.to_dict(strict=strict, include_source=True, include_diff=True)
+        payload["text"] = render_fix_text(report, strict=strict)
         self._send_json(200, payload)
 
     @staticmethod

@@ -46,6 +46,14 @@ svgemb check design.svg --strict               # warnings count as failures
 svgemb check design.svg --json                 # machine readable
 svgemb check design.svg -p ./profiles/myshop.yaml
 
+svgemb fix design.svg                          # what it would repair; writes nothing
+svgemb fix design.svg -o fixed.svg             # repair, then re-check the result
+svgemb fix design.svg --dry-run                # the same, with a diff
+svgemb fix design.svg --allow lossy            # also repairs that change the design
+svgemb fix ./designs -r --in-place             # a whole folder (keeps each .svg.bak)
+svgemb fix design.svg --only color.max_count   # one rule at a time
+svgemb fix design.svg --stdout > fixed.svg     # for a pipe (the report goes to stderr)
+
 svgemb profiles                                # list all rulesets
 svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
@@ -56,7 +64,8 @@ svgemb doctor                                  # what this machine can do
 ```
 
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
-error (so it drops straight into CI).
+error (so it drops straight into CI). `svgemb fix` adds `3` — svgemb caught its
+own output misbehaving and refused to write it.
 
 As a library:
 
@@ -93,7 +102,11 @@ server.
 
 The web UI is one self-contained page (no CDN, no external fonts), so it works
 with the phone offline. It shows a preview of the design, lets you switch
-rulesets to compare shops, and has a "copy report as text" button. Pull down
+rulesets to compare shops, and has a "copy report as text" button. A failing
+file also gets a **Fix what can be fixed** button: it lists what was repaired
+and what was left alone, shows the design before and after side by side, and
+offers the result as a download — your file is never modified in place.
+Repairs that delete artwork are deliberately command-line only. Pull down
 Termux's notification and tap **Acquire wakelock** if Android keeps killing the
 server in the background.
 
@@ -212,11 +225,12 @@ is measured at its real size.
 
 ## Where this is going
 
-[`docs/ROADMAP.md`](docs/ROADMAP.md) plans the next two phases: opt-in automatic
-fixing of the errors reported here, then converting raster images into
-embroidery-ready SVGs. Both are split into steps with explicit validation gates.
+[`docs/ROADMAP.md`](docs/ROADMAP.md) plans two phases: opt-in automatic fixing
+of the errors reported here, then converting raster images into embroidery-ready
+SVGs. Both are split into steps with explicit validation gates.
 
-Steps A0, A1 and A2 are done — the foundations everything else needs:
+**Phase A is complete** — `svgemb fix` is the whole of it, seen from outside.
+The steps behind it:
 
 - **A0** — the tool writes SVGs back out without damaging them. An element
   nobody edited is copied byte for byte from the source, so a future fix
@@ -288,10 +302,39 @@ Without the geometry extra those two fixes are unavailable and
 `geometry.min_feature_size` reports that it did not measure — it never changes
 a verdict based on what happens to be installed.
 
-`svgemb rules` marks which rules are fixable and at what risk; the `svgemb fix`
-command lands in A6.
+- **A6** — `svgemb fix`, and the same thing as a button in the web UI. The
+  command applies what it is allowed to, re-checks the file, and prints the
+  before/after verdict:
 
-Check both against your own files:
+```
+$ svgemb fix design.svg --allow lossy -o fixed.svg
+📄 design.svg   [profile: embroidery-basic]
+──────────────────────────────────────────────────────────────
+✅ fixed    geometry.canvas_size  [safe]
+       width 5cm -> 10cm  (/svg)
+✅ fixed    color.max_count  [lossy]
+       #654321 -> #123456 (1 place(s))
+⏭ skipped  element.forbidden  [safe]
+       <text> are part of the artwork; removing them would delete visible
+       content, so that is a manual decision
+ℹ️ not measured  geometry.min_feature_size
+       …this machine has no path geometry backend. To measure it, install
+       the geometry extra: pip install "svg-for-embroidery[geometry]".
+──────────────────────────────────────────────────────────────
+❌ FAIL → ❌ FAIL   9 → 4 error(s), 1 → 1 warning(s)
+   visual: 1437/65536 pixels differ (2.19%), max channel delta 255
+   still failing: color.no_gradients, element.forbidden, path.closed
+wrote fixed.svg
+```
+
+**The skips are the important half.** A file that still fails after fixing is
+the normal case — the remaining errors are the ones needing a human — so each is
+listed with the reason it was left: a decision only you can make, a risk level
+you didn't allow, or a package you can install. Nothing is written unless you
+say where (`-o`, `--in-place`, `--stdout`), and `--allow destructive` will not
+run at all until you name the rule with `--only`.
+
+Check any of it against your own files:
 
 ```bash
 svgemb roundtrip ~/designs -r
@@ -329,7 +372,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-python -m pytest        # 295 tests
+python -m pytest        # 324 tests
 ```
 
 Layout:
@@ -350,6 +393,6 @@ src/svg_embroidery/
   geometry.py      flattening (pure Python) + offsetting/booleans (roadmap A5)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
-  server.py        stdlib-only web UI (svgemb serve)
-  cli.py           svgemb
+  server.py        stdlib-only web UI: check and fix (svgemb serve)
+  cli.py           svgemb check / fix / roundtrip / doctor / serve
 ```

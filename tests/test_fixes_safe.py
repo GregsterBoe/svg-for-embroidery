@@ -9,7 +9,6 @@ import pytest
 from svg_embroidery.checker import Checker
 from svg_embroidery.document import parse_svg
 from svg_embroidery.fixes import FixEngine, Risk, available_fixers, verify_fixer
-from svg_embroidery.units import to_mm
 
 SMALL = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="5cm" height="5cm" viewBox="0 0 50 50">\n'

@@ -1,6 +1,5 @@
 """A0: the writer must not damage what it writes."""
 
-from pathlib import Path
 
 import pytest
 

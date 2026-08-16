@@ -5,16 +5,28 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Set
 
 from .checker import Checker
 from .document import SvgParseError, load_svg
+from .fixes import FixEngine, Risk, fixer_classes_for, risks_up_to
 from .profiles import ProfileError, list_profiles, load_profile
-from .report import render_json, render_summary, render_text
+from .report import (
+    render_fix_json,
+    render_fix_summary,
+    render_fix_text,
+    render_json,
+    render_summary,
+    render_text,
+)
 from .rules import RuleConfigError, available_rules
 from .writer import WriterError
 
 DEFAULT_PROFILE = "embroidery-basic"
+
+#: ``svgemb fix`` returns this when the engine caught its own output misbehaving
+#: — a different thing from "your file still fails", and nothing is written.
+EXIT_VERIFICATION_FAILED = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +49,72 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--strict", action="store_true", help="treat warnings as failures")
     check.add_argument("--no-color", action="store_true", help="plain ASCII output")
     check.add_argument(
+        "-r", "--recursive", action="store_true", help="descend into directories"
+    )
+
+    fix = subparsers.add_parser(
+        "fix",
+        help="repair what can be repaired, then re-check",
+        description=(
+            "Apply the fixes a profile's rules have, re-check the result, and report "
+            "both what changed and what could not be. Nothing is written unless you "
+            "say where: -o, --in-place or --stdout."
+        ),
+        epilog=(
+            "Exit codes: 0 the file passes, 1 it still has errors, "
+            "2 a usage or file error, 3 svgemb caught its own output misbehaving."
+        ),
+    )
+    fix.add_argument("files", nargs="+", type=Path, help="SVG file(s) or directories")
+    fix.add_argument(
+        "-p",
+        "--profile",
+        default=DEFAULT_PROFILE,
+        help=f"profile name or path to a YAML ruleset (default: {DEFAULT_PROFILE})",
+    )
+    # One destination at most: writing to two places at once is always a typo.
+    destination = fix.add_mutually_exclusive_group()
+    destination.add_argument(
+        "-o", "--output", type=Path, metavar="FILE", help="write the result here (one input)"
+    )
+    destination.add_argument(
+        "-i", "--in-place", action="store_true", help="overwrite each input file"
+    )
+    destination.add_argument("--stdout", action="store_true", help="write the result to stdout")
+    fix.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="with --in-place, do not keep the original as FILE.bak",
+    )
+    fix.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="show the diff and write nothing, even with -o",
+    )
+    fix.add_argument("--diff", action="store_true", help="also show a unified diff")
+    fix.add_argument(
+        "--allow",
+        default=Risk.SAFE.value,
+        choices=[risk.value for risk in Risk],
+        help="riskiest change allowed; each level includes the safer ones "
+        f"(default: {Risk.SAFE.value})",
+    )
+    fix.add_argument(
+        "--only",
+        action="append",
+        metavar="RULE",
+        help="fix only these rules (repeatable, or comma separated)",
+    )
+    fix.add_argument("--json", action="store_true", help="machine readable output")
+    fix.add_argument("--strict", action="store_true", help="treat warnings as failures")
+    fix.add_argument("--no-color", action="store_true", help="plain ASCII output")
+    fix.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="skip the before/after render check (faster, unproven)",
+    )
+    fix.add_argument(
         "-r", "--recursive", action="store_true", help="descend into directories"
     )
 
@@ -131,9 +209,163 @@ def _cmd_check(args: argparse.Namespace) -> int:
             )
         if len(reports) > 1:
             print()
-            print(render_summary(reports, strict=args.strict))
+            print(render_summary(reports, strict=args.strict, color=not args.no_color))
 
     failed = any(not report.passed(strict=args.strict) for report in reports)
+    return 1 if failed else 0
+
+
+def _selected_rules(args: argparse.Namespace, profile) -> Optional[Set[str]]:
+    """``--only`` as a set, refusing ids that would silently match nothing."""
+    if not args.only:
+        return None
+    wanted: Set[str] = set()
+    for value in args.only:
+        wanted.update(part.strip() for part in value.split(",") if part.strip())
+    known = {rule.id for rule in available_rules()}
+    in_profile = {spec.id for spec in profile.rules}
+    for rule_id in sorted(wanted):
+        if rule_id not in known:
+            raise ValueError(f"unknown rule '{rule_id}' (see: svgemb rules)")
+        if rule_id not in in_profile:
+            raise ValueError(f"rule '{rule_id}' is not in profile '{profile.name}'")
+    return wanted
+
+
+def _destructive_rules(profile, selected: Optional[Set[str]]) -> List[str]:
+    """Rules in play that have a destructive repair."""
+    return sorted(
+        spec.id
+        for spec in profile.rules
+        if (selected is None or spec.id in selected)
+        and any(cls.risk is Risk.DESTRUCTIVE for cls in fixer_classes_for(spec.id))
+    )
+
+
+def _write_fixed(args: argparse.Namespace, report, stream) -> Optional[Path]:
+    """Put the result where the flags say, or nowhere. Returns the path written."""
+    if args.dry_run or not report.ok:
+        return None
+    if args.stdout:
+        print(report.source_after, end="")
+        return None
+    destination = args.output or (report.file if args.in_place else None)
+    if destination is None:
+        return None
+    if args.in_place and not report.changed:
+        return None  # nothing to say, and no reason to touch the mtime
+
+    note = ""
+    if args.in_place and not args.no_backup:
+        # Overwriting the only copy of someone's artwork is the one irreversible
+        # thing this tool does, so it keeps the original next to it.
+        backup = destination.with_suffix(destination.suffix + ".bak")
+        backup.write_text(report.source_before, encoding="utf-8")
+        note = f"  (original kept as {backup.name})"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(report.source_after, encoding="utf-8")
+    print(f"wrote {destination}{note}", file=stream)
+    return destination
+
+
+def _cmd_fix(args: argparse.Namespace) -> int:
+    try:
+        profile = load_profile(args.profile)
+        Checker(profile)  # surfaces a bad parameter before anything is touched
+        selected = _selected_rules(args, profile)
+    except (ProfileError, RuleConfigError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    allow = risks_up_to(args.allow)
+    if Risk.DESTRUCTIVE in allow and selected is None:
+        # A destructive repair deletes or reshapes artwork, so it is asked for
+        # one rule at a time. "--allow destructive" alone is too broad a wish to
+        # honour: it would mean "do anything at all to make this pass".
+        candidates = _destructive_rules(profile, None)
+        if not candidates:
+            print(
+                f"error: no rule in profile '{profile.name}' has a destructive fix",
+                file=sys.stderr,
+            )
+        else:
+            listed = " ".join(f"--only {rule_id}" for rule_id in candidates)
+            print(
+                "error: a destructive fix changes what the design means, so it has to "
+                f"be asked for by name: {listed}",
+                file=sys.stderr,
+            )
+        return 2
+
+    if args.json and args.stdout:
+        print("error: --json and --stdout both claim stdout; pick one", file=sys.stderr)
+        return 2
+
+    files = _collect_files(args.files, args.recursive)
+    missing = [path for path in files if not path.exists()]
+    for path in missing:
+        print(f"error: no such file: {path}", file=sys.stderr)
+    files = [path for path in files if path.exists()]
+    if not files:
+        if not missing:
+            print("error: no SVG files found", file=sys.stderr)
+        return 2
+    if len(files) > 1 and (args.output or args.stdout):
+        print(
+            "error: -o/--stdout take a single input; use --in-place for several files",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Whatever claims stdout — the fixed SVG, or the JSON — the report moves aside.
+    stream = sys.stderr if (args.stdout or args.json) else sys.stdout
+    engine = FixEngine(profile, allow=allow, only=selected, verify=not args.no_verify)
+
+    reports = []
+    for path in files:
+        try:
+            reports.append(engine.fix_file(path))
+        except (SvgParseError, WriterError, OSError) as exc:
+            print(f"error: {path}: {exc}", file=sys.stderr)
+            return 2
+
+    if args.json:
+        for report in reports:
+            _write_fixed(args, report, stream)
+        print(render_fix_json(reports, strict=args.strict, diff=args.diff or args.dry_run))
+    else:
+        for index, report in enumerate(reports):
+            if index:
+                print(file=stream)
+            print(
+                render_fix_text(
+                    report,
+                    strict=args.strict,
+                    color=not args.no_color,
+                    diff=args.diff or args.dry_run,
+                ),
+                file=stream,
+            )
+            written = _write_fixed(args, report, stream)
+            if written is None and report.ok and report.changed and not args.stdout:
+                note = (
+                    "(dry run: nothing was written)"
+                    if args.dry_run
+                    else "(nothing written: pass -o FILE, --in-place or --stdout to keep it)"
+                )
+                print(note, file=stream)
+        if len(reports) > 1:
+            print(file=stream)
+            print(
+                render_fix_summary(reports, strict=args.strict, color=not args.no_color),
+                file=stream,
+            )
+
+    if any(not report.ok for report in reports):
+        return EXIT_VERIFICATION_FAILED
+    failed = any(
+        not (report.after or report.before).passed(strict=args.strict) for report in reports
+    )
     return 1 if failed else 0
 
 
@@ -182,8 +414,6 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
 
 
 def _cmd_rules(args: argparse.Namespace) -> int:
-    from .fixes import fixer_classes_for
-
     rules = available_rules()
     if args.json:
         import json
@@ -318,6 +548,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "check":
         return _cmd_check(args)
+    if args.command == "fix":
+        return _cmd_fix(args)
     if args.command == "profiles":
         return _cmd_profiles(args)
     if args.command == "rules":

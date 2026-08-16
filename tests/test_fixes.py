@@ -374,3 +374,43 @@ def test_report_reads_clearly():
     assert "geometry.require_viewbox" in text
     assert "errors: 0 -> 0" in text
     assert report.fixed_rules == ["geometry.require_viewbox"]
+
+
+def test_a_satisfied_rule_stops_the_escalation():
+    """The safe repair was enough, so the lossy one is never offered.
+
+    Otherwise the run would report "skipped: needs --allow lossy" about a rule
+    it had just finished fixing, which reads as an unmet need.
+    """
+    almost_closed = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="12cm" height="12cm" '
+        'viewBox="0 0 120 120">\n'
+        '  <g id="a"><path d="M10 10 L110 10 L110 110 L10 110 L10 10" fill="#000000"/></g>\n'
+        "</svg>\n"
+    )
+    engine = FixEngine.from_profile_name("embroidery-basic")
+    report = engine.fix_source(almost_closed)
+
+    assert report.fixed_rules == ["path.closed"]
+    assert "path.closed" not in {skip.rule_id for skip in report.skipped}
+
+
+def test_the_report_serialises_for_a_machine():
+    engine = FixEngine.from_profile_name("embroidery-basic")
+    report = engine.fix_source(TOO_MANY_COLOURS)
+    payload = report.to_dict()
+
+    assert payload["ok"] is True
+    skipped = {entry["rule"]: entry for entry in payload["skipped"]}
+    assert skipped["color.max_count"] == {
+        "rule": "color.max_count", "risk": "lossy", "reason": "needs --allow lossy"
+    }
+    # A rule with no fixer at all has no risk to report.
+    assert skipped["structure.color_layers"]["risk"] is None
+    assert payload["before"]["counts"]["error"] == payload["after"]["counts"]["error"]
+    assert payload["fixed_rules"] == [] and "color.max_count" in payload["remaining_rules"]
+    assert "svg" not in payload and "diff" not in payload  # asked for neither
+
+    full = report.to_dict(include_source=True, include_diff=True)
+    assert full["svg"] == report.source_after
+    assert full["diff"] == report.diff()

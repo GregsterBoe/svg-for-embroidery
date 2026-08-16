@@ -80,6 +80,17 @@ class Report:
     def infos(self) -> List[Finding]:
         return self.of_severity(Severity.INFO)
 
+    @property
+    def unmeasured(self) -> List[Finding]:
+        """Checks that could not run on this machine.
+
+        A rule with no capability behind it reports ``measured=False`` and stays
+        INFO, because a missing library is not a defect in the file — but the
+        difference between "passed" and "never ran" matters to whoever reads the
+        verdict, so these stay visible even when the other INFOs are folded away.
+        """
+        return [f for f in self.findings if f.data.get("measured") is False]
+
     def passed(self, strict: bool = False) -> bool:
         """True when the file may be uploaded. ``strict`` also fails warnings."""
         if self.errors:
@@ -99,5 +110,6 @@ class Report:
             "profile": self.profile,
             "passed": self.passed(strict=strict),
             "counts": self.counts(),
+            "unmeasured": [f.rule_id for f in self.unmeasured],
             "findings": [f.to_dict() for f in self.findings],
         }

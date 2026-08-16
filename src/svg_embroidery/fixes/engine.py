@@ -11,11 +11,11 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Optional, Sequence, Set
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set
 
 from ..checker import Checker
 from ..document import SvgDocument, parse_svg
-from ..findings import Report, Severity
+from ..findings import Finding, Report, Severity
 from ..profiles import Profile, load_profile
 from ..visual import Difference, RenderError, visual_difference
 from ..writer import serialize
@@ -35,6 +35,16 @@ class AppliedFix:
             str(change) for change in self.changes
         )
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "rule": self.rule_id,
+            "risk": self.risk.value,
+            "changes": [
+                {"description": change.description, "location": change.location}
+                for change in self.changes
+            ],
+        }
+
 
 @dataclass
 class SkippedFix:
@@ -45,6 +55,13 @@ class SkippedFix:
     def __str__(self) -> str:
         risk = f" [{self.risk.value}]" if self.risk else ""
         return f"{self.rule_id}{risk}: {self.reason}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "rule": self.rule_id,
+            "risk": self.risk.value if self.risk else None,
+            "reason": self.reason,
+        }
 
 
 @dataclass
@@ -88,6 +105,16 @@ class FixReport:
             return []
         return sorted({finding.rule_id for finding in self.after.errors})
 
+    @property
+    def unmeasured(self) -> List[Finding]:
+        """Checks this machine could not run.
+
+        Reported alongside the skips because they are the same kind of news: not
+        a fault in the design, but something the run could not do — and, unlike
+        most skips, one an install fixes.
+        """
+        return self.before.unmeasured
+
     def diff(self, context: int = 3) -> str:
         """Unified diff of the file, for a dry run."""
         name = self.file.name if self.file else "design.svg"
@@ -118,6 +145,33 @@ class FixReport:
         if self.visual is not None:
             lines.append(f"visual: {self.visual}")
         return "\n".join(lines)
+
+    def to_dict(
+        self,
+        strict: bool = False,
+        include_source: bool = False,
+        include_diff: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "file": str(self.file) if self.file else None,
+            "profile": self.profile,
+            "ok": self.ok,
+            "changed": self.changed,
+            "verification_error": self.verification_error,
+            "applied": [fix.to_dict() for fix in self.applied],
+            "skipped": [skip.to_dict() for skip in self.skipped],
+            "unmeasured": [finding.to_dict() for finding in self.unmeasured],
+            "fixed_rules": self.fixed_rules,
+            "remaining_rules": self.remaining_rules,
+            "before": self.before.to_dict(strict=strict),
+            "after": None if self.after is None else self.after.to_dict(strict=strict),
+            "visual": None if self.visual is None else self.visual.to_dict(),
+        }
+        if include_source:
+            payload["svg"] = self.source_after
+        if include_diff:
+            payload["diff"] = self.diff()
+        return payload
 
 
 class FixEngine:
@@ -255,13 +309,13 @@ class FixEngine:
                 # styles and geometry, so the next one must not read a stale view.
                 candidate_source = serialize(doc)
                 candidate = parse_svg(candidate_source, path=path)
+                candidate_report = self.checker.check_document(candidate)
 
                 # Each fix stands on its own. Scaling a canvas down, for
                 # instance, can push strokes under the minimum width — that fix
                 # gets rolled back rather than poisoning the whole run.
                 regression = self._regression(
-                    self._errors_per_rule(before),
-                    self._errors_per_rule(self.checker.check_document(candidate)),
+                    self._errors_per_rule(before), self._errors_per_rule(candidate_report)
                 )
                 if regression:
                     report.skipped.append(
@@ -279,6 +333,12 @@ class FixEngine:
                 )
                 current_source = candidate_source
                 doc = candidate
+
+                if rule.id not in self._failing_rule_ids(candidate_report):
+                    # The safe repair was enough. Stopping here keeps the run
+                    # from reporting "skipped: needs --allow lossy" about a rule
+                    # that is already satisfied, which reads as an unmet need.
+                    break
 
         report.source_after = current_source
         report.after = self.checker.check_document(doc)

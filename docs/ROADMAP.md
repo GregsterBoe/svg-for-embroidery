@@ -964,9 +964,12 @@ B2 ships knowing it under-rates scans and says so.
 
 </details>
 
-> **Deliberately not in the web UI.** B7 is the step that owns the phone
+> ~~**Deliberately not in the web UI.** B7 is the step that owns the phone
 > journey — upload, preview, sliders, download — and triage is one panel of it.
-> Adding a lone assess button now would be guessing at that layout twice.
+> Adding a lone assess button now would be guessing at that layout twice.~~
+> **Landed in B7**, as the panel that answers "is it worth converting?" before
+> anyone waits on a conversion — abstentions printed alongside the verdict, and
+> available even where no tracer is installed, since measuring needs nothing.
 
 ### B3. Preprocessing pipeline · ✅ CLEARED
 
@@ -1626,7 +1629,107 @@ starting point than this plan assumed.
 > the loop with "no knob answers this". It says exactly that, which is the
 > honest floor.
 
-### B7. In the UI · size M
+### B7. In the UI · ✅ CLEARED
+
+Drop an image on the same page that checks SVGs and the whole of Phase B is
+behind it: what triage makes of the picture, the loop tracing it, every attempt
+it made with the reason it moved on, the knobs it turned as sliders you can turn
+yourself, and the SVG as a download. Then **Check and fix this SVG** hands the
+result to the A6/A7 journey on the same page, so an image can go all the way to
+a file the shop accepts without a terminal.
+
+`svgemb serve` gained `/api/capabilities`, `/api/image` and `/api/convert`; the
+page gained a second journey and kept the first one intact.
+
+**The wait was the one genuinely new decision, and the answer was to stop
+treating the loop as one call.** B6 traces up to four times, and on a phone with
+no `potrace` binary each of those is pure-Python potracer. A single request
+holding the connection through all four says nothing for a minute and then says
+everything. So the page asks for **one attempt per request** and shows each try
+as it lands, with a stop button that takes effect after the current one.
+
+That works only because the judgement did not move into the browser.
+`plan_next()` is B6's decision — which complaint to answer, which knob costs
+least, whether a document that *passed* did so by cutting artwork — lifted out
+of its `for` loop and called by both. `convert()` runs it in a loop, the page
+runs it a request at a time, and a test asserts the two produce the same
+attempts, the same settings and the same document. A page that re-implemented
+that would have been a second copy of B6 with no test suite behind it.
+
+**Which is why the server now remembers something, for the first time.** It
+still writes nothing to disk, but a decoded source is kept in memory between
+attempts — content-addressed, two images at a time, dropped when a third
+arrives. Re-uploading and re-decoding per attempt would have cost more than the
+trace it was there to serve. A browser asking about an image the server has
+forgotten gets a 409 saying so, and re-sends it: it still has the file, so the
+recovery is a round trip rather than an apology.
+
+**An over-sized upload is refused rather than quietly resized, and the reason is
+measured.** Nothing downstream reads more than 256 px on the longest side, so
+shrinking a 12 MP photo on arrival looks free — and is not. The box filter is
+not associative: reducing to 256 px and *then* to the profile's resolution
+measured `flat` at **0.47** on an image that measures **0.06** in one step,
+because the intermediate average had already erased the grain the metric exists
+to notice. A page that graded an image differently from `svgemb assess` on the
+same file would be a worse failure than one that says the image is too big, so
+there is a pixel cap with a message, and it is read from the PNG header before
+anything is allocated.
+
+**The sliders are the knobs the loop turns**, in the order B6 tries them and
+labelled with what each costs the artwork: size *costs nothing — the same
+artwork, sewn larger*, absorbing specks *costs shapes this ruleset already calls
+too small to sew*, dropping a colour *costs part of the design*. So a slider is
+someone overriding a retry, not a setting nobody has thought about — and their
+ends are the profile's own numbers, `canvas_limits` and `color.max_count` and
+`min_area` in this attempt's pixels. A value dragged past them is **clamped and
+reported**, because a slider past the shop's limit only buys a document that
+fails the check it was converted for. The colour floor gives way where the
+ceiling is lower: a shop that stocks one thread gets a slider that reads 1.
+
+**The page lands on the attempt B6 would keep, not the last one it made.** The
+loop shows try 4 while it is working and then settles on try 2 if that is the
+one that kept the most drawing, exactly as `svgemb convert` hands back `best`
+rather than the newest. A hand-made attempt does not become the answer by being
+most recent either — it is shown, because you asked for it, and the one svgemb
+would keep is marked ★ with the reason in words.
+
+**B2's triage panel, finally delivered.** It was kept out of the UI on purpose
+so this step could lay the journey out once. It prints the abstentions as well
+as the verdict — *colour loss and flatness did not vote: on a speckled image
+these measure the grain rather than the artwork* — because a verdict resting on
+fewer readings than it looks like is the one report nobody can act on. A
+hopeless image still gets a **Convert to SVG** button, under a sentence saying
+the tracer will not fix what triage just measured.
+
+**Where the mobile/desktop decision becomes visible.** A machine with no tracer
+says so in the panel where someone would otherwise tap Convert, prints the
+install line, and then gives the answer that decision already reached: run
+`svgemb serve --host 0.0.0.0` on a computer that has one and open it from this
+browser. Measuring still works there — reading a PNG and grading it needs
+nothing installed — so a phone with no tracer can still be told an image is
+hopeless before anybody waits on a conversion.
+
+**One page, one column or two.** Everything you give it on the left, everything
+it made of that on the right, collapsing to a single column in source order
+below 900 px. The same file, the same handlers, one media query — the same
+answer this project gave when it declined to fork for mobile.
+
+**Done when** — ~~the full journey works on a phone, offline~~ ✅, with the
+offline half structural rather than asserted: the page fetches nothing but its
+own origin (a test greps it for external URLs), the server is standard library
+only, and every stage of the pipeline has a pure-Python path. Verified here
+through the API and against a headless DOM rather than on a physical handset,
+which is the honest limit of this session's evidence.
+
+The gate that matters is the one that could have gone wrong:
+`test_the_browser_drives_the_same_loop_the_command_line_runs` converts
+`line-art-thick.png` one request at a time and asserts the settings, the
+attempts and the finished document are byte-identical to `convert()` running the
+loop by itself — 8 cm fails on fine detail, 12 cm passes, 24 shapes and 213
+nodes, the same numbers B6 recorded.
+
+<details>
+<summary>Original plan for this step</summary>
 
 Upload an image on the phone → side-by-side preview → sliders for colours and
 detail → live re-check → download the SVG.
@@ -1649,6 +1752,14 @@ traces up to four times, and on a device that cannot install `potrace` the
 answer is the one the mobile/desktop decision already gave — run `svgemb serve`
 on a machine that can, and let the phone be the client.
 
+</details>
+
+> **Still open: the page cannot answer a question yet.** A7's repairs-that-ask
+> are reachable from the *checking* journey, so a converted document reaches
+> them through **Check and fix this SVG** — one tap, but a tap. A conversion
+> never produces a rule that asks today, which is why this is a note rather than
+> a step; a shop profile with an unusual rule would make it one.
+
 ---
 
 ## Sequencing
@@ -1661,7 +1772,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
-   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED     ✅ CLEARED
+   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED     ✅ CLEARED    ✅ CLEARED
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
@@ -1673,8 +1784,9 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B0 through B6 are done, and what they add up to is one
-command: `svgemb convert photo.jpg -o design.svg` takes an image, cleans it,
+**Where Phase B stands: it is finished.** B0 through B7 are done, and what they
+add up to is one command: `svgemb convert photo.jpg -o design.svg` takes an
+image, cleans it,
 traces it in layers with no seams, removes what cannot be sewn, checks the
 result against the shop's own rules, and — when it still fails — changes a
 setting the profile already allows and tries again. `scan-clean` went from `fit`
@@ -1684,8 +1796,9 @@ more, and **13 of the 14 images a human called convertible now convert
 unattended** at `embroidery-strict`, where a single pass managed 11. The one
 that does not is 1 px line art, which is what it was drawn to be.
 
-**B7 is next**, and it is the only step left in the phase: the same journey on a
-phone, with previews and sliders instead of flags.
+**B7 closed it**: the same journey on a phone, with a triage panel, attempt
+list, previews and sliders instead of flags — and the conversion handed to the
+checker and its repairs on the same page. Both phases are complete.
 
 The corpus is also still asking for two things nobody planned: a **deskew**
 stage (the only triage miss left is `scan-skewed`, and nothing measures

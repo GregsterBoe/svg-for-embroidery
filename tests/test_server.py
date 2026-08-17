@@ -1,3 +1,4 @@
+import base64
 import json
 import pathlib
 import threading
@@ -8,7 +9,8 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from svg_embroidery.geometry import default_backend
-from svg_embroidery.server import BUILD, MAX_BODY_BYTES, CheckRequestHandler
+from svg_embroidery.server import BUILD, MAX_BODY_BYTES, CheckRequestHandler, recall
+from svg_embroidery.tracer import default_backend as tracer_backend
 
 
 @pytest.fixture(scope="module")
@@ -287,6 +289,221 @@ def test_the_page_offers_the_fix_and_a_download(base_url):
     assert "api/fix" in body
     assert "Download the fixed SVG" in body
     assert "URL.createObjectURL" in body  # the download never leaves the device
+
+
+# -- B7: converting an image from the browser ------------------------------
+
+CORPUS = pathlib.Path(__file__).resolve().parents[1] / "bench" / "corpus"
+#: Too fine to stitch at the smallest size embroidery-strict allows and fine at
+#: a larger one — so the loop has something to argue with, in two attempts.
+CONVERTIBLE = CORPUS / "line-art-thick.png"
+
+needs_tracer = pytest.mark.skipif(
+    tracer_backend() is None, reason="no tracer installed here"
+)
+
+
+def upload(base_url, path=CONVERTIBLE, profile="embroidery-strict"):
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return post_json(
+        base_url + "/api/image",
+        {"image": encoded, "filename": path.name, "profile": profile},
+    )
+
+
+def test_capabilities_are_asked_of_the_code_that_does_the_work(base_url):
+    status, body = get(base_url + "/api/capabilities")
+    assert status == 200
+    caps = json.loads(body)
+    assert caps["tracer"] == (tracer_backend().name if tracer_backend() else None)
+    assert ".png" in caps["formats"]  # readable with nothing installed at all
+    assert caps["max_megapixels"] and caps["max_tries"]
+
+
+def test_an_uploaded_image_is_graded_exactly_as_the_command_line_grades_it(base_url):
+    """``svgemb assess`` and this page cannot disagree about an image."""
+    from svg_embroidery import triage
+    from svg_embroidery.bench import measure_file
+
+    status, body = upload(base_url)
+    assert status == 200
+    expected = triage.assess(measure_file(CONVERTIBLE, profile="embroidery-strict"))
+    assert body["assessment"]["verdict"] == expected.verdict.value
+    assert body["assessment"]["headline"] == expected.headline()
+    assert body["assessment"]["readings"] == [r.to_dict() for r in expected.readings]
+
+
+def test_the_starting_settings_and_slider_ranges_come_from_the_profile(base_url):
+    _, body = upload(base_url)
+    assert body["settings"] == {
+        "canvas_cm": 8.0, "colors": 2, "speck_area": 1, "work_side": 160,
+        "describe": "8.0 cm, 2 colour(s)",
+    }
+    assert body["limits"]["canvas_min_cm"] == 8.0
+    assert body["limits"]["canvas_max_cm"] == 30.0
+    assert body["limits"]["colors_max"] == 2
+
+    _, basic = upload(base_url, profile="embroidery-basic")
+    assert basic["settings"]["canvas_cm"] == 10.0 and basic["limits"]["colors_max"] == 3
+
+
+def test_an_upload_that_is_not_an_image_is_a_message_not_a_stack_trace(base_url):
+    assert post_json(base_url + "/api/image", {"image": ""})[0] == 400
+    status, body = post_json(base_url + "/api/image", {"image": "not base64 @@@"})
+    assert status == 400 and "not readable" in body["error"]
+    status, body = post_json(
+        base_url + "/api/image",
+        {"image": base64.b64encode(GOOD.encode()).decode(), "filename": "design.svg"},
+    )
+    assert status == 400  # an SVG is already a vector; assess takes the image
+
+
+@needs_tracer
+def test_the_browser_drives_the_same_loop_the_command_line_runs(base_url):
+    """The gate for B7: the same image, the same profile, the same answer.
+
+    The page asks for one attempt at a time so a phone can show each try as it
+    lands. That is a difference in *pacing*, and this proves it is only that —
+    the settings tried, the document kept and the verdict all match
+    :func:`~svg_embroidery.convert.convert` running the loop by itself.
+    """
+    from svg_embroidery.convert import convert
+    from svg_embroidery.profiles import load_profile
+    from svg_embroidery.raster import load_image
+
+    _, start = upload(base_url)
+    key, settings = start["key"], None
+    attempts = []
+    for _ in range(start["max_tries"]):
+        payload = {"key": key, "profile": "embroidery-strict"}
+        if settings is not None:
+            payload["settings"] = settings
+        status, attempt = post_json(base_url + "/api/convert", payload)
+        assert status == 200
+        attempts.append(attempt)
+        if not attempt["next"] or not attempt["next"]["turned"]:
+            break
+        settings = attempt["next"]["settings"]
+
+    expected = convert(load_image(CONVERTIBLE), load_profile("embroidery-strict"))
+    assert len(attempts) == expected.tries
+    assert [a["settings"]["canvas_cm"] for a in attempts] == [
+        round(one.settings.canvas_cm, 2) for one in expected.attempts
+    ]
+    kept = attempts[attempts[-1]["best_index"]]
+    assert kept["svg"] == expected.svg
+    assert kept["passes"] is expected.passes
+
+
+@needs_tracer
+def test_an_attempt_reports_what_it_drew_and_what_the_ruleset_says(base_url):
+    _, start = upload(base_url)
+    status, attempt = post_json(
+        base_url + "/api/convert", {"key": start["key"], "profile": "embroidery-strict"}
+    )
+    assert status == 200
+    assert attempt["svg"].lstrip().startswith("<?xml") or "<svg" in attempt["svg"][:200]
+    assert attempt["shapes"] > 0 and attempt["nodes"] > 0
+    assert attempt["report"]["profile"] == "embroidery-strict"
+    assert attempt["verified"] is True
+    # Every stage says what it did, in the words it said it in.
+    assert any("quantise" in note for note in attempt["notes"])
+    # The document that comes back is the one the checker would grade.
+    _, rechecked = post_json(
+        base_url + "/api/check",
+        {"svg": attempt["svg"], "profile": "embroidery-strict"},
+    )
+    assert rechecked["counts"]["error"] == attempt["report"]["counts"]["error"]
+
+
+@needs_tracer
+def test_a_slider_dragged_past_the_ruleset_is_pulled_back_and_told_so(base_url):
+    _, start = upload(base_url)
+    _, attempt = post_json(
+        base_url + "/api/convert",
+        {
+            "key": start["key"],
+            "profile": "embroidery-strict",
+            "settings": {"canvas_cm": 500, "colors": 9, "speck_area": 1},
+        },
+    )
+    assert attempt["settings"]["canvas_cm"] == 30.0
+    assert attempt["settings"]["colors"] == 2
+    assert len(attempt["clamped"]) == 2
+
+    status, refused = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict",
+         "settings": {"canvas_cm": "wide"}},
+    )
+    assert status == 400 and "unusable settings" in refused["error"]
+
+
+@needs_tracer
+def test_a_hand_made_attempt_does_not_become_the_answer_by_being_last(base_url):
+    """B6 keeps the smallest passing attempt; a slider does not overrule that."""
+    _, start = upload(base_url)
+    first = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict", "reset": True,
+         "settings": {"canvas_cm": 12}},
+    )[1]
+    assert first["passes"] and first["best_index"] == 0
+    second = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict",
+         "settings": {"canvas_cm": 20}},
+    )[1]
+    assert second["passes"] and second["index"] == 1
+    assert second["best_index"] == 0  # the smaller one still wins
+
+
+def test_an_image_the_server_has_forgotten_is_asked_for_again(base_url):
+    status, body = post_json(
+        base_url + "/api/convert", {"key": "0000000000000000", "profile": "embroidery-basic"}
+    )
+    assert status == 409
+    assert body["reupload"] is True
+
+
+def test_only_a_couple_of_images_are_kept_at_once(base_url):
+    """A decoded image is the largest thing this process holds."""
+    from svg_embroidery.server import MAX_SESSIONS, forget_all
+
+    forget_all()
+    keys = [
+        upload(base_url, path)[1]["key"]
+        for path in sorted(CORPUS.glob("*.png"))[: MAX_SESSIONS + 1]
+    ]
+    assert post_json(
+        base_url + "/api/convert", {"key": keys[0], "profile": "embroidery-basic"}
+    )[0] == 409
+    assert recall(keys[-1]) is not None
+
+
+def test_the_same_file_twice_is_the_same_session(base_url):
+    assert upload(base_url)[1]["key"] == upload(base_url)[1]["key"]
+
+
+def test_the_page_carries_the_whole_journey(base_url):
+    _, body = get(base_url + "/")
+    for piece in ("api/image", "api/convert", "api/capabilities",
+                  "Is it worth converting?", "Convert to SVG",
+                  "Download this SVG", "Check and fix this SVG"):
+        assert piece in body, piece
+    # The knobs are the ones the loop turns, and they are sliders.
+    assert 'type="range"' in body
+    for knob in ("canvas_cm", "colors", "speck_area"):
+        assert knob in body
+    # One column on a phone, two where there is room — one page, not two.
+    assert "@media (min-width: 900px)" in body
+    assert "grid-template-columns: 1fr" in body
+
+
+def test_the_page_says_what_to_do_when_this_machine_cannot_trace(base_url):
+    _, body = get(base_url + "/")
+    assert "No tracer on this machine" in body
+    assert "svgemb serve --host 0.0.0.0" in body  # the mobile/desktop answer
 
 
 # -- a tab left open across a restart --------------------------------------

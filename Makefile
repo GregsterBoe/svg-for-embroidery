@@ -18,7 +18,7 @@ help:
 	@echo "make corpus       regenerate the corpus images"
 	@echo "make roundtrip    prove the writer returns files unchanged (A0 gate)"
 	@echo "make doctor       show what this machine can do"
-	@echo "make serve        run the local web UI"
+	@echo "make serve        run the local web UI: check, fix, convert (B7)"
 
 test:
 	$(PYTHON) -m pytest -q

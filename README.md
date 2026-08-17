@@ -79,7 +79,7 @@ svgemb bench --tracers                         # compare every installed tracer 
 svgemb bench --overlap 0                       # trace butt joints, to see the seams (B4)
 svgemb bench --convert -p embroidery-strict    # B6's gate: how many convert unattended
 
-svgemb serve                                   # local web UI on http://localhost:8000
+svgemb serve                                   # web UI on localhost:8000 — check, fix, convert
 svgemb roundtrip design.svg                    # verify read/write changes nothing
 svgemb doctor                                  # what this machine can do
 ```
@@ -125,16 +125,31 @@ needed, since the browser reads the file and posts its contents to the local
 server.
 
 The web UI is one self-contained page (no CDN, no external fonts), so it works
-with the phone offline. It shows a preview of the design, lets you switch
-rulesets to compare shops, and has a "copy report as text" button. A failing
+with the phone offline, and it lays out in one column on a phone and two on a
+desktop. Drop in an **SVG** and it checks it: a preview, the findings, a
+ruleset switcher to compare shops, and a "copy report as text" button. A failing
 file also gets a **Fix what can be fixed** button: it lists what was repaired
 and what was left alone, shows the design before and after side by side, and
 offers the result as a download — your file is never modified in place. Where a
 repair needs a decision, the choices appear as buttons saying what each one
 costs; that is the only way to reach a repair that deletes artwork, because
-there is no *setting* here that quietly switches one on. Pull down
-Termux's notification and tap **Acquire wakelock** if Android keeps killing the
-server in the background.
+there is no *setting* here that quietly switches one on.
+
+Drop in an **image** and it converts it. First it says whether that is worth
+doing at all — the same verdict `svgemb assess` gives, from the same
+measurement — and then it runs the conversion loop **one attempt at a time**, so
+you watch each try land instead of waiting on all four. Every attempt is listed
+with the reason it moved on ("stitched larger: 8.0 → 12.0 cm; the artwork is
+unchanged, only the size it is sewn at"), any two of them can be compared side
+by side, and the settings the loop turns are sliders you can turn yourself —
+size, colours, how much speckle to absorb, each labelled with what it costs.
+Values outside what the ruleset allows are pulled back, and it says so. Then
+download the SVG, or hand it to the checker with **Check and fix this SVG**
+without leaving the page. If this machine has no tracer, the page says so and
+points you at running `svgemb serve --host 0.0.0.0` on one that does.
+
+Pull down Termux's notification and tap **Acquire wakelock** if Android keeps
+killing the server in the background.
 
 ```bash
 svgemb serve --port 8080          # different port
@@ -143,8 +158,11 @@ svgemb serve --host 0.0.0.0       # reach it from your laptop: http://<phone-ip>
 
 `--host 0.0.0.0` exposes the checker to everyone on the same Wi-Fi, so use it
 only on a network you trust; the default binds to localhost only. The server
-writes nothing to disk — uploads are checked in memory and dropped, request
-bodies are capped at 8 MB, and the uploaded filename is stripped to its basename.
+writes nothing to disk — request bodies are capped at 8 MB, images at 16
+megapixels, and the uploaded filename is stripped to its basename. An SVG is
+checked in memory and dropped; an image being converted is *kept* in memory
+between attempts, two at a time, so that tracing it four times does not mean
+decoding it four times. Nothing survives the process.
 
 Other options: **Pydroid 3** runs the CLI on Android without Termux, **a-Shell**
 does the same on iOS, and you can always run `svgemb serve --host 0.0.0.0` on a
@@ -422,11 +440,11 @@ Check any of it against your own files:
 svgemb roundtrip ~/designs -r
 ```
 
-### Phase B: images → SVG, all but the UI
+### Phase B: images → SVG
 
-`svgemb convert image.png -o design.svg` is the whole phase seen from outside:
-B0–B6 are done, and B7 — the same journey on a phone, with previews and sliders
-— is what is left. The steps behind it:
+`svgemb convert image.png -o design.svg` is the whole phase seen from outside,
+and `svgemb serve` is the same journey with sliders instead of flags. The steps
+behind it:
 
 **B1 — the measuring instrument, built before the thing it measures.** The
 premise of Phase B is that quality comes from preprocessing, not from the
@@ -798,6 +816,21 @@ line art, which is what it was drawn to be: the run says so, names every size it
 tried, and hands back the attempt that kept the most drawing rather than the
 last one it made.
 
+**B7 — the same thing without a terminal.** `svgemb serve` takes an image on the
+phone: triage first, then the loop **one attempt at a time**, so each try
+appears as it lands rather than after all four. That pacing is the only
+difference — `plan_next()` is B6's judgement lifted out of its own `for` loop,
+so the page and the command line turn the same knobs in the same order and
+produce the same document, which is asserted by a test rather than assumed.
+
+The sliders are those knobs, labelled with what each costs the artwork, and
+their ends are the profile's own limits; drag one past them and it is pulled
+back with a sentence saying why. The page lands on the attempt svgemb would
+keep, not the last one it made, and marks it ★ when you are looking at another.
+See [docs/ROADMAP.md](docs/ROADMAP.md#b7-in-the-ui---cleared) for the two
+decisions that cost something: why an over-sized upload is refused instead of
+resized, and why the server now remembers a decoded image at all.
+
 ### Optional capabilities
 
 The checker needs nothing but the standard library and PyYAML. Heavier work is
@@ -845,7 +878,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-make test         # 429 tests
+make test         # 591 tests
 make degraded     # the same suite with every optional extra switched off
 make bench        # measure the image corpus against the baseline
 make tracers      # compare every installed tracer on the corpus (roadmap B0)
@@ -870,11 +903,15 @@ src/svg_embroidery/
   raster.py        reading images, quantising, measuring them (roadmap B1)
   tracer.py        potrace / potracer / vtracer behind one API (roadmap B0)
   bench.py         the corpus sweep and the baseline diff (roadmap B1)
+  triage.py        good / marginal / hopeless, from B1's numbers (roadmap B2)
+  preprocess.py    the six stages run before anything is traced (roadmap B3)
+  cleanup.py       repairing what the tracer drew, by its profile (roadmap B5)
+  convert.py       the retry loop: image in, SVG the shop accepts out (B6)
   capabilities.py  what this machine can do (svgemb doctor)
   fixes/           the fix protocol, engine and verifier (roadmap A2)
                      safe.py / lossy.py / geometry.py / choices.py — the fixers
-  server.py        stdlib-only web UI: check and fix (svgemb serve)
-  cli.py           svgemb check / fix / roundtrip / doctor / bench / serve
+  server.py        stdlib-only web UI: check, fix, convert (svgemb serve, B7)
+  cli.py           svgemb check / fix / assess / convert / bench / serve
 bench/
   make_corpus.py   generates the 20-image corpus, deterministically
   corpus/          the images and their manifest

@@ -136,6 +136,95 @@ def _load_with_pillow(path: Path) -> Raster:
         raise RasterError(f"{path.name}: {exc}") from exc
 
 
+#: The most pixels one image may decode to. How big a file is says nothing
+#: about how much memory it becomes — 8 MB of flat white PNG expands to several
+#: hundred megapixels — and B7's web UI keeps the decoded source for as long as
+#: someone is working on it.
+#:
+#: It applies to :func:`load_bytes` alone: a file on disk is one the user
+#: pointed the CLI at deliberately, while an upload is whatever a browser
+#: posted, and only the second is held in memory by a server.
+#:
+#: An over-sized image is **refused rather than quietly resized**, which looks
+#: unhelpful and is the honest option: nothing downstream reads more than 256 px
+#: on the longest side, but the box filter that gets there is not associative.
+#: Reducing to 256 px first and then to the profile's resolution measured
+#: ``flat`` at 0.47 on an image that measures 0.06 in one step — the intermediate
+#: average had already erased the grain the metric exists to notice. A page that
+#: silently graded an image differently from ``svgemb assess`` on the same file
+#: would be worse than one that says the image is too large.
+MAX_PIXELS = 16_000_000
+
+
+def _refuse_if_huge(size: Tuple[int, int], name: str) -> None:
+    width, height = size
+    if width * height > MAX_PIXELS:
+        raise RasterError(
+            f"{name}: {width}x{height} is {width * height / 1e6:.0f} megapixels, over the "
+            f"{MAX_PIXELS // 1_000_000} MP limit — scale it down first. Embroidery is "
+            "traced at a few hundred pixels, so nothing is lost by handing in less"
+        )
+
+
+def png_size(data: bytes) -> Optional[Tuple[int, int]]:
+    """Width and height straight out of a PNG header, without decoding it.
+
+    The IHDR chunk is at a fixed offset, so this costs nothing and — more to the
+    point — happens *before* any memory is allocated for the pixels.
+    """
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", data[16:24])
+    return int(width), int(height)
+
+
+def load_bytes(data: bytes, name: str = "image") -> Raster:
+    """:func:`load_image`, for bytes that never became a file.
+
+    The web UI receives an upload in a request body and this project's server
+    writes nothing to disk, so the decoder has to work from memory. Same
+    ordering as :func:`load_image` — the built-in decoder handles PNG even where
+    Pillow is installed, so a phone and a desktop report the same numbers about
+    the same image.
+    """
+    if not data:
+        raise RasterError(f"{name}: no image data received")
+
+    size = png_size(data)
+    if size is not None:
+        _refuse_if_huge(size, name)
+        try:
+            return decode_png(data)
+        except Exception as exc:  # noqa: BLE001 - report the image, not the traceback
+            if not pillow_available():
+                raise RasterError(f"{name}: {exc}") from exc
+            return _bytes_with_pillow(data, name)  # 16-bit or interlaced: let Pillow try
+
+    if not pillow_available():
+        raise RasterError(
+            f"{name}: this does not look like a PNG, and reading anything else needs "
+            f'Pillow (pip install "svg-for-embroidery[convert]"); '
+            "PNG works with no dependencies at all"
+        )
+    return _bytes_with_pillow(data, name)
+
+
+def _bytes_with_pillow(data: bytes, name: str) -> Raster:
+    import io
+
+    from PIL import Image  # imported lazily: optional dependency
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            _refuse_if_huge(image.size, name)
+            rgba = image.convert("RGBA")
+            return Raster(width=rgba.width, height=rgba.height, pixels=rgba.tobytes())
+    except RasterError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Pillow's failure modes vary by format
+        raise RasterError(f"{name}: {exc}") from exc
+
+
 def encode_png(raster: Raster) -> bytes:
     """Write RGBA back out as a PNG.
 

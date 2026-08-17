@@ -3,6 +3,7 @@
 import pytest
 
 from svg_embroidery.raster import (
+    MAX_PIXELS,
     RasterError,
     available_readers,
     downsample,
@@ -10,8 +11,10 @@ from svg_embroidery.raster import (
     encode_png,
     flat_ratio,
     has_alpha,
+    load_bytes,
     load_image,
     pillow_available,
+    png_size,
     quantise,
     rgb_pixels,
     thin_ratio,
@@ -65,6 +68,43 @@ def test_a_format_we_cannot_read_says_what_to_install(tmp_path, monkeypatch):
 def test_a_missing_file_is_reported_as_one(tmp_path):
     with pytest.raises(RasterError, match="no such image"):
         load_image(tmp_path / "nope.png")
+
+
+# -- reading an upload, which never becomes a file (B7) -----------------------
+
+def test_bytes_and_a_file_decode_to_the_same_image(tmp_path):
+    """The web UI reads from a request body; the CLI reads from disk."""
+    original = image(6, 4, lambda x, y: (x * 30, y * 50, 90, 255))
+    path = tmp_path / "from-disk.png"
+    path.write_bytes(encode_png(original))
+    assert load_bytes(encode_png(original), "upload.png").pixels == load_image(path).pixels
+
+
+def test_an_upload_that_is_not_an_image_says_so_rather_than_crashing(monkeypatch):
+    monkeypatch.setenv("SVGEMB_NO_RASTER", "1")
+    with pytest.raises(RasterError) as caught:
+        load_bytes(b"<svg>not a raster at all</svg>", "design.svg")
+    assert "does not look like a PNG" in str(caught.value)
+    with pytest.raises(RasterError, match="no image data"):
+        load_bytes(b"", "empty.png")
+
+
+def test_a_decompression_bomb_is_refused_before_it_is_decoded():
+    """A PNG header claims its size, so the refusal costs no memory at all.
+
+    The header is edited rather than a real image generated, because the point
+    is that nothing here ever allocates the pixels: a file small enough to
+    upload can claim hundreds of megapixels.
+    """
+    import struct
+
+    honest = bytearray(encode_png(image(4, 4, solid(RED))))
+    assert png_size(bytes(honest)) == (4, 4)
+    honest[16:24] = struct.pack(">II", 40_000, 40_000)  # 1.6 gigapixels
+    with pytest.raises(RasterError) as caught:
+        load_bytes(bytes(honest), "huge.png")
+    assert "megapixels" in str(caught.value)
+    assert str(MAX_PIXELS // 1_000_000) in str(caught.value)
 
 
 # -- reshaping ---------------------------------------------------------------

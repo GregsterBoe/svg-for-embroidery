@@ -364,7 +364,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-r", "--recursive", action="store_true", help="descend into directories"
     )
 
-    serve = subparsers.add_parser("serve", help="run the local web UI (phone friendly)")
+    serve = subparsers.add_parser(
+        "serve", help="run the local web UI — check, fix and convert (phone friendly)"
+    )
     serve.add_argument("-P", "--port", type=int, default=8000, help="port (default: 8000)")
     serve.add_argument(
         "--host",

@@ -19,10 +19,13 @@ from svg_embroidery.convert import (
     Settings,
     adjust,
     canvas_limits,
+    clamp,
     convert,
     initial_settings,
     kernel_radius,
+    limits_for,
     min_area_mm2,
+    plan_next,
     prepare,
     render_conversion,
     working_side,
@@ -197,6 +200,81 @@ def test_a_complaint_no_knob_answers_stops_the_loop():
     """Better a run that stops than one that turns something at random."""
     settings = Settings(canvas_mm=80.0, colors=2, work_side=160)
     assert adjust(settings, ["color.no_gradients"], STRICT) is None
+
+
+# -- turning the knobs by hand (B7) ------------------------------------------
+
+def test_a_slider_reaches_exactly_as_far_as_the_loop_does():
+    """The range is read off the profile, not invented for the page."""
+    settings = Settings(canvas_mm=80.0, colors=2, work_side=160)
+    limits = limits_for(STRICT, settings)
+    assert (limits.canvas_min_mm, limits.canvas_max_mm) == canvas_limits(STRICT)
+    assert not limits.canvas_open_ended
+    # The speck cap is the number _more_despeckling stops at, for the same
+    # reason: past the profile's own minimum area it removes artwork.
+    assert limits.speck_max == adjust(settings, ["path.max_count"], STRICT)[0].speck_area
+
+
+def test_a_colour_slider_never_offers_more_than_the_profile_allows():
+    """A budget over the limit only buys a document that fails its own check."""
+    assert limits_for(STRICT, Settings(80.0, 2, 160)).colors_max == 2
+    assert limits_for(BASIC, Settings(100.0, 3, 200)).colors_max == 3
+    # A shop that stocks one thread means one, so the floor gives way, not the
+    # ceiling.
+    vinyl = load_profile("plotter-vinyl")
+    limits = limits_for(vinyl, initial_settings(vinyl, 256)[0])
+    assert (limits.colors_min, limits.colors_max) == (1, 1)
+
+
+def test_a_profile_with_no_maximum_size_says_the_end_is_the_pages_own(tmp_path):
+    path = tmp_path / "open.yaml"
+    path.write_text("name: open\nrules:\n  - id: color.max_count\n    max: 3\n")
+    profile = load_profile(str(path))
+    limits = limits_for(profile, initial_settings(profile, 256)[0])
+    assert limits.canvas_open_ended
+    assert limits.canvas_max_mm > limits.canvas_min_mm
+
+
+def test_settings_dragged_past_the_profile_are_pulled_back_and_reported():
+    wanted = Settings(canvas_mm=5000.0, colors=99, work_side=160, speck_area=400)
+    settings, notes = clamp(wanted, STRICT)
+    assert settings.canvas_mm == 300.0 and settings.colors == 2
+    assert len(notes) == 3
+    assert "30.0 cm" in notes[0] and "2" in notes[1] and "mm²" in notes[2]
+    # Inside the limits, nothing is changed and nothing is said.
+    assert clamp(settings, STRICT) == (settings, [])
+
+
+@needs_tracer
+def test_the_loop_can_be_run_one_attempt_at_a_time(lattice_run):
+    """B7 drives the loop from a browser, and must make the same decisions.
+
+    ``plan_next`` is the judgement itself, lifted out of the ``for``: asked
+    about an attempt this run already made, it proposes exactly what the run
+    went on to do. A page that re-implemented this would be a second copy of
+    B6 with no test suite behind it.
+    """
+    first = lattice_run.attempts[0]
+    proposed, adjustment = plan_next(first, STRICT)
+    assert adjustment.knob == first.adjustment.knob
+    assert adjustment.says == first.adjustment.says
+    assert proposed.canvas_mm == lattice_run.attempts[1].settings.canvas_mm
+    # And the attempt the run kept is one the page can point at by number.
+    assert lattice_run.attempts[lattice_run.best_index] is lattice_run.best
+
+
+@needs_tracer
+def test_an_attempt_that_passed_with_the_drawing_intact_ends_it(lattice_run):
+    assert plan_next(lattice_run.best, STRICT) is None
+
+
+def test_the_speck_cap_is_read_at_the_size_that_survived_clamping():
+    """One pixel is worth more millimetres on a bigger canvas, so the cap moves."""
+    small, _ = clamp(Settings(80.0, 2, 160, speck_area=9), STRICT)
+    assert small.speck_area == 9
+    big, notes = clamp(Settings(9999.0, 2, 160, speck_area=9), STRICT)
+    assert big.canvas_mm == 300.0 and big.speck_area == 1
+    assert any("would remove artwork at this size" in note for note in notes)
 
 
 # -- the loop ----------------------------------------------------------------

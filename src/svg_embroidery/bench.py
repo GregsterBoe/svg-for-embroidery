@@ -58,7 +58,7 @@ from .tracer import DEFAULT_OVERLAP
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
 from .tracer import TracerError, default_backend, measure_svg
 from .triage import Band, assess
-from .visual import compare_rasters, render, show_through
+from .visual import Raster, compare_rasters, render, show_through
 
 #: Where the corpus lives when nothing else is said. Kept out of ``tests/`` on
 #: purpose: it is a measuring instrument that happens to be checked in, not a
@@ -494,6 +494,39 @@ def measure(
         row.unmeasured = str(exc)
         return row
 
+    return measure_raster(
+        source,
+        row,
+        profile,
+        work_side=work_side,
+        backend=backend,
+        preprocess=preprocess,
+        overlap=overlap,
+        cleanup=cleanup,
+        convert=convert,
+        tries=tries,
+    )
+
+
+def measure_raster(
+    source: Raster,
+    row: Measurement,
+    profile: Profile,
+    work_side: Optional[int] = None,
+    backend: Optional[TracerBackend] = None,
+    preprocess: bool = False,
+    overlap: int = DEFAULT_OVERLAP,
+    cleanup: bool = False,
+    convert: bool = False,
+    tries: Optional[int] = None,
+) -> Measurement:
+    """:func:`measure`, from pixels already in memory rather than from a file.
+
+    Split out for B7: an image uploaded to the web UI never becomes a file, and
+    the page has to be able to say what ``svgemb assess`` would say about it.
+    Sharing the body rather than the intent is the point — one implementation
+    means the browser and the terminal cannot grade the same image differently.
+    """
     row.size = f"{source.width}x{source.height}"
     row.alpha = has_alpha(source)
 

@@ -253,6 +253,12 @@ class Conversion:
         )
 
     @property
+    def best_index(self) -> int:
+        """Which attempt :attr:`best` picked, for a UI that lists them all."""
+        best = self.best
+        return next(i for i, attempt in enumerate(self.attempts) if attempt is best)
+
+    @property
     def passes(self) -> bool:
         return any(attempt.passes for attempt in self.attempts)
 
@@ -511,6 +517,108 @@ KNOBS: Sequence[
 )
 
 
+@dataclass(frozen=True)
+class Limits:
+    """How far each knob may be turned, read off the profile.
+
+    The loop turns these itself and never needs to know the range — it asks for
+    one step and is told whether there was room. B7 needs the range as a number,
+    because a slider has two ends, and they are the same numbers: the canvas
+    bounds are :func:`canvas_limits`, the colour ceiling is the profile's own
+    ``color.max_count``, and the speck cap is ``min_area`` in this attempt's
+    pixels, which is exactly where :func:`_more_despeckling` stops.
+    """
+
+    canvas_min_mm: float
+    canvas_max_mm: float
+    #: True when the profile sets no maximum canvas at all. The loop treats that
+    #: as "no ceiling" and stops when it runs out of attempts; a slider cannot,
+    #: so the page invents an end and this flag is how it says so out loud.
+    canvas_open_ended: bool
+    #: Never above the profile's own ``color.max_count``: a budget over the
+    #: limit only buys a document that fails the check it was converted for.
+    #: The floor is the loop's two-colour rule, or the profile's ceiling where
+    #: that is lower still — a shop that stocks one thread means one thread.
+    colors_min: int
+    colors_max: int
+    speck_min: int
+    speck_max: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "canvas_min_cm": round(self.canvas_min_mm / 10.0, 2),
+            "canvas_max_cm": round(self.canvas_max_mm / 10.0, 2),
+            "canvas_open_ended": self.canvas_open_ended,
+            "colors_min": self.colors_min,
+            "colors_max": self.colors_max,
+            "speck_min": self.speck_min,
+            "speck_max": self.speck_max,
+        }
+
+
+#: What a slider offers when the profile names no maximum canvas. The loop's own
+#: ceiling in that case is the try budget — four attempts at half again each —
+#: so this is that same reach, and it is the page's number rather than the
+#: shop's, which is why :attr:`Limits.canvas_open_ended` exists to say so.
+OPEN_ENDED_CANVAS = CANVAS_STEP ** DEFAULT_TRIES
+
+
+def limits_for(profile: Profile, settings: Settings) -> Limits:
+    """The range of every knob, at the size this attempt is being made."""
+    smallest, largest = canvas_limits(profile)
+    open_ended = not math.isfinite(largest)
+    if open_ended:
+        largest = smallest * OPEN_ENDED_CANVAS
+    budget = color_budget(profile)
+    return Limits(
+        canvas_min_mm=smallest,
+        canvas_max_mm=largest,
+        canvas_open_ended=open_ended,
+        colors_min=min(MIN_COLORS, budget),
+        colors_max=budget,
+        speck_min=1,
+        speck_max=max(1, int(min_area_mm2(profile) / (settings.mm_per_pixel ** 2))),
+    )
+
+
+def clamp(settings: Settings, profile: Profile) -> Tuple[Settings, List[str]]:
+    """Pull hand-set knobs back inside what the profile allows, and say so.
+
+    B7 lets someone turn these by hand, which is the one thing the loop cannot
+    do — but a slider dragged past the shop's own limit is asking for a document
+    the shop will reject, and answering it silently would produce a conversion
+    that fails a check it never had to fail. Clamping *and reporting* is the
+    same choice A6 made about a repair it declined to make: the interesting half
+    of the answer is the reason.
+    """
+    limits = limits_for(profile, settings)
+    notes: List[str] = []
+    canvas = min(max(settings.canvas_mm, limits.canvas_min_mm), limits.canvas_max_mm)
+    if abs(canvas - settings.canvas_mm) > 0.05:
+        notes.append(
+            f"{settings.canvas_cm:.1f} cm is outside what this profile accepts, so "
+            f"the design is sized at {canvas / 10:.1f} cm"
+        )
+    colors = min(max(settings.colors, limits.colors_min), limits.colors_max)
+    if colors != settings.colors:
+        notes.append(
+            f"{settings.colors} colours is outside {limits.colors_min}–"
+            f"{limits.colors_max}, so the budget is {colors}"
+        )
+    # Re-read the speck cap at the size that survived: it is a number of pixels,
+    # and how much a pixel is worth is exactly what the canvas knob changes.
+    at_size = replace(settings, canvas_mm=canvas, colors=colors)
+    cap = limits_for(profile, at_size).speck_max
+    speck = min(max(settings.speck_area, 1), cap)
+    if speck != settings.speck_area:
+        notes.append(
+            f"absorbing regions under {settings.speck_area}px would remove artwork at "
+            f"this size, so it stops at {speck}px — the profile's "
+            f"{min_area_mm2(profile):.2f} mm²"
+        )
+    return replace(at_size, speck_area=speck), notes
+
+
 def adjust(
     settings: Settings, failing: Sequence[str], profile: Profile
 ) -> Optional[Tuple[Optional[Settings], Adjustment]]:
@@ -582,6 +690,36 @@ def one_attempt(
     )
 
 
+def plan_next(
+    attempt: Attempt, profile: Profile
+) -> Optional[Tuple[Optional[Settings], Adjustment]]:
+    """What to try after this attempt, or ``None`` when there is nothing to argue with.
+
+    The loop's whole judgement, in one function: which complaint to answer, what
+    turning that knob would cost, and whether a document that *passed* did so at
+    a price worth one more trace. :func:`convert` runs it in a ``for``; B7's page
+    runs it one attempt per request, so a phone can show each try as it lands
+    instead of staring at a spinner for four of them. Both get the same
+    decisions because there is only one copy of them.
+    """
+    complaints = attempt.failing_rules
+    if attempt.passes:
+        if not attempt.cut_detail:
+            return None
+        complaints = [FINE_DETAIL_RULE]
+    decided = adjust(attempt.settings, complaints, profile)
+    if decided is None:
+        return None
+    proposed, adjustment = decided
+    if attempt.passes:
+        adjustment = replace(
+            adjustment,
+            says="passes only after cutting detail finer than the needle out "
+            "of the artwork, so it is " + adjustment.says,
+        )
+    return proposed, adjustment
+
+
 def convert(
     source: Raster,
     profile: Profile,
@@ -624,15 +762,13 @@ def convert(
         except TracerError as exc:  # a tracer that fails mid-run is not a verdict
             raise ConvertError(str(exc)) from exc
         conversion.attempts.append(attempt)
-        # What the loop wants answered. A failing document asks with its
-        # errors; one that passed only by cutting artwork asks with the repair
-        # it needed, which is the same complaint arriving as a receipt rather
-        # than as a verdict.
-        complaints = attempt.failing_rules
-        if attempt.passes:
-            if not attempt.cut_detail:
-                break
-            complaints = [FINE_DETAIL_RULE]
+        # A document that passed with the whole drawing intact is the end of it.
+        # Everything else has something to answer: a failing one asks with its
+        # errors, and one that passed only by cutting artwork asks with the
+        # repair it needed — the same complaint arriving as a receipt rather
+        # than as a verdict. :func:`plan_next` reads both.
+        if attempt.passes and not attempt.cut_detail:
+            break
         if number == tries:
             # Never print a change that was not made: the loop stops here, and
             # what would have been turned next is not what happened.
@@ -643,16 +779,10 @@ def convert(
                 turned=False,
             )
             break
-        decided = adjust(current, complaints, profile)
+        decided = plan_next(attempt, profile)
         if decided is None:
             break
         proposed, adjustment = decided
-        if attempt.passes:
-            adjustment = replace(
-                adjustment,
-                says="passes only after cutting detail finer than the needle out "
-                "of the artwork, so it is " + adjustment.says,
-            )
         attempt.adjustment = adjustment
         if proposed is None:
             break

@@ -1760,6 +1760,279 @@ on a machine that can, and let the phone be the client.
 > never produces a rule that asks today, which is why this is a note rather than
 > a step; a shop profile with an unusual rule would make it one.
 
+### B8. The background is not a colour · ⬜ NOT STARTED
+
+**Added after B7, from use** — the same way A7 was. Every conversion of artwork
+on paper spends a thread on the paper, and nobody stitches the garment.
+
+**The pipeline already finds the background and throws the finding away.**
+`preprocess.flatten_background` floods in from the corners, works out the paper
+colour and snaps every pixel within tolerance to it — then returns the raster
+and a coverage share, and **the seed colour never leaves the function**. By the
+time `quantise_lab` runs, paper is one Lab cluster like any other;
+`MaskBackend.trace` emits a `<g>` for every palette index with area above zero;
+and `color.max_count` counts its fill like any other fill.
+
+Three costs, in the order they hurt:
+
+- it spends one of the shop's threads on the garment;
+- it is the largest-area layer, so it is stitched first and it is most of the
+  stitches in the file;
+- B4's trap grows every other layer under it, which is work done for the benefit
+  of a layer that should not exist.
+
+**Decision: `color.max_count` counts *threads*, so the quantiser is asked for
+k+1.** The rule's number is what a shop loads onto the machine, and paper is not
+loaded onto the machine. On a two-colour logo on white paper, at a budget of 3:
+
+| | quantiser asked for | palette | dropped | in the file |
+| --- | --- | --- | --- | --- |
+| **k** | 3 | paper + 2 inks | paper | 2 inks — a thread unused |
+| **k+1** | 4 | paper + 3 inks | paper | 3 inks — the budget spent on artwork |
+
+The reading that decided it: under `k`, the *same artwork* gets three inks when
+it is exported with an alpha channel and two when it is scanned onto white
+paper. That is the tool punishing the file format, not the shop expressing a
+constraint. The counter-argument is real and worth writing down — the rule
+checks `doc.colors()`, which is a fact about the document, and today's closed
+loop (one number handed to the quantiser and enforced by the checker, with no
+arithmetic in between) is a property worth something. It is given up
+deliberately, for the reason above.
+
+**The +1 is conditional, and the guard is most of the step.** A background is
+not always found: `flatten_background` bails when the fill swallows more than
+`MAX_BACKGROUND` of the picture, and the corners can disagree. So the budget is
+raised *only when an entry is actually going to be dropped*, and there are two
+ways that fails after the raise:
+
+- **no palette entry matches the seed** within a just-noticeable difference —
+  the paper got split across clusters, or merged into artwork. Fall back to `k`,
+  drop nothing, and say so as a stage note.
+- **the matching entry is not the one the fill found** — it covers far less of
+  the image than `flatten_background` reported. Same answer.
+
+Both are the ground rule the project already has — *a measurement you can't take
+is not a failure* — applied to a stage rather than a metric. A conversion that
+cannot identify the paper produces exactly the document it produces today.
+
+**`Settings.colors` comes to mean ink colours**, with the quantiser's argument
+derived from it rather than the other way round. B7's slider is labelled with
+the profile's ceiling and *"dropping a colour costs part of the design"*;
+somebody dragging that is choosing threads, and a slider that silently included
+the paper would be lying about what it costs.
+
+**Transparency is the absence of an element, not an attribute.** There is
+nothing to add to the document — an SVG has no background unless something
+paints one, so dropping the layer *is* the transparency. The consequence to
+handle is in the preview, not the file: `visual.py` composites onto white before
+comparing, by design, so a transparent document renders identically to a
+white-backed one and the page would show no difference at all. The UI previews
+the conversion onto a non-white ground so the hole is visible.
+
+**The trap has to know which index is leaving.** `trapped_claims` builds
+`allowed` from stitching rank, letting a layer grow into the pixels of layers
+stitched after it. If the background is the bottom layer — the usual case, since
+order is largest-area-first — dropping it is free, because nothing was growing
+into it. If it is *not* the largest area, dropping it exposes the one-pixel
+fringe that every earlier layer was grown by, as a hairline of the wrong colour
+around the transparent region. The dropped index must be excluded from
+`allowed`, not merely from the output.
+
+**`gaps` can no longer answer its question the old way.** B4's column is the
+share of the document with no paint on it, read off the renderer's alpha — and a
+dropped background is unpainted *on purpose*. Left alone the metric reports the
+whole background as a defect and the number that used to mean "a seam opened"
+means nothing. Either the dropped region comes out of the denominator, or
+`background_dropped` joins the conditions a baseline refuses to be diffed
+across. **The first, by B1's own rule**: a metric that can't answer the question
+must not print a number, and `gaps` still has a real question to answer here —
+whether the *seams between the remaining layers* held.
+
+**The retry loop is off by one until it is told.** `_fewer_colours` steps the
+budget down and stops at `MIN_COLORS`, saying *"below that there is no design
+left to convert"*. Once `colors` means inks that sentence is true again; while
+it silently includes paper, the loop reaches a silhouette one step before it
+thinks it has.
+
+**Do:** carry the seed out of `flatten_background` into `Preprocessed`; match it
+to a palette index after quantisation, with the two guards above; skip that
+index in `MaskBackend.trace` and exclude it from `trapped_claims`; derive the
+quantiser's `k` from `Settings.colors` in `convert.py`; teach `bench.gaps` about
+the dropped region; re-record the baseline.
+
+**Done when:**
+
+- a corpus image with paper converts to one fewer layer than it does today, and
+  the document has **no fill in the paper colour** — checked by rendering it
+  over a non-white ground and finding that ground where the paper was;
+- `color.max_count` at 3 sees **3 ink colours, not 2** — the k+1 decision, made
+  visible in the checker's own output rather than asserted here;
+- an image where no background is found (`alpha-logo`, the photographs) converts
+  **byte-identically to today**. This is the gate that matters: the step is a new
+  branch, and the old branch must not move;
+- a fixture whose paper is *not* the largest area drops it with **no fringe** of
+  the layer beneath. The corpus has no such image — `bench/make_corpus.py` needs
+  a `paper-minority` entry, a design that reaches the edges with a small ground
+  showing through;
+- `gaps` on a dropped-background document reports the **seam residue** it
+  reported before, not the background.
+
+> **Open, and to be measured rather than assumed: excluding the background from
+> the *histogram*, not merely dropping its entry afterwards.** k+1 frees a
+> thread; taking the paper's pixels out of the clustering altogether would also
+> take them out of the competition for splits, and there is a mechanism by which
+> that matters — `quantise_lab` picks its next split with
+> `max(candidates, key=spread)`, and `spread` is count-weighted, so a large
+> paper region with slight residual variation can win a split it does not need.
+> Whether that changes any real palette beyond what k+1 already does is an
+> empirical question, and B1 exists so this kind of question is answered by
+> `svgemb bench --convert` rather than by argument. Half a day to try, and it is
+> deliberately not in B8's gate: land the simple version, look at the numbers,
+> and add this only if they ask for it.
+
+---
+
+## Phase C — Editing the result by hand
+
+Phase A repairs a document because a *rule* complained. Phase B produces one
+from an image. Phase C is the first time the tool changes a document because
+**the person looking at it said so**, which is a different kind of permission
+and deserves its own phase rather than another fixer.
+
+### Decision: a layer panel, not an editor
+
+The question asked up front, the same way the mobile/desktop fork was: should
+the browser gain SVG editing? **No — and the distinction that settles it is
+attribute edits versus geometry edits.**
+
+A converted document is unusually simple by construction: `layered_svg` writes
+one `<g id="colour-N" fill="…">` per colour with a single `<path>` inside. Every
+edit anyone actually wants after a conversion — drop that colour, recolour it,
+change what is stitched first — is an operation on *that list*, and needs no
+geometry at all. A panel over it is small and safe.
+
+A node editor is a different project: selection, transforms, undo, path editing,
+snapping, save-back, and a document model that survives a round trip — several
+weeks, reimplementing A0's hazards in JavaScript without `verify_fixer` or A1's
+visual diff behind it. Inkscape is better at it, and the round trip is already
+proven, since A0's corpus is modelled on Inkscape's own output.
+
+So the division of labour is: **svgemb decides what can be stitched, Inkscape
+changes what is drawn.** Phase A made this call once already, for text → paths.
+
+**Revisit if:** the panel turns out to be the thing people work around rather
+than the thing they use.
+
+### C1. Remove a colour from the conversion · ⬜ NOT STARTED
+
+**This is B8's mechanism with a human picking the index.** B8 builds "do not
+stitch this palette entry" and points it at the paper the corner fill found; C1
+points it at whatever the person tapped. Build it once, in the pipeline, and the
+background becomes the special case where the tool picks the index itself.
+
+**Which is also why removal re-traces rather than deleting an element.** Cutting
+the `<g>` out of the finished document is one line and leaves the fringe B8
+describes: every layer stitched before this one was grown a pixel underneath it
+by B4's trap, and removing the cover exposes that growth as a hairline of the
+wrong colour around the hole. Re-tracing with the index excluded produces the
+document that colour was never in — no fringe, correct seams between what is
+left, and the checker's verdict is about the file you will actually download.
+It costs one trace, which the page is already built to wait for a request at a
+time.
+
+**Do:**
+
+- a panel listing the conversion's layers — swatch, colour, share of the design,
+  and a remove control;
+- removal re-runs the current attempt with that index excluded, through
+  `plan_next`'s existing one-attempt-per-request path;
+- an eyedropper on the source image that overrides *which* entry is the
+  background. Picking is local — the page already holds the upload as a data
+  URI, so a canvas readback needs no round trip; only the re-trace does;
+- removals are shown as what they are: a document with fabric showing through,
+  previewed over a non-white ground.
+
+**Done when:** removing a colour from a converted document leaves **no fringe**
+of the layer beneath, the re-check on the page agrees with `svgemb check` on the
+downloaded file, and the automatic background drop and a hand-picked removal go
+down the same code path — asserted the way B7 asserted the loop, by comparing
+against the CLI rather than by inspection.
+
+### C2. Recolour a layer · ⬜ DEFERRED
+
+Deliberately after C1, because it shares nothing with it: exclusion changes the
+geometry that gets traced, and recolouring changes one attribute on a group that
+is already correct. Cheap when it comes — `fill` lives on the `<g>`, so it is a
+single attribute edit, no geometry, and A0's writer already edits attributes
+without reformatting the file around them.
+
+**Check the existing route first.** `color.allowed_palette` and its fixer
+already snap every colour in a document to the nearest stocked thread in Lab
+space and report each substitution. If the want is "use my thread colours", that
+is a profile with its `colors:` filled in, and it is the *profile is the spec*
+answer rather than a second one. A manual per-layer override is the escape hatch
+for when a specific colour matters more than the nearest thread — a real case,
+but a narrower one than it first looks.
+
+**And it is narrower still than it looks, because recolouring cannot separate.**
+A layer is a palette entry, so it is every pixel of that colour *anywhere in the
+image*. If a red cape shares an entry with a red shield, changing that group's
+`fill` changes both, and no amount of editing gets them apart. Wanting a colour
+to be its own thread is a question for the quantiser, which is C3 — and it is
+why C2 is the smallest of the three rather than the one to reach for.
+
+### C3. Pin a colour · ⬜ GATED ON B8
+
+**The eyedropper pointing into the artwork rather than at the paper:** *there is
+a red here, give it an entry.* Where C1 says a colour must not be stitched, C3
+says one must.
+
+**Why it is gated rather than scheduled.** B8 hands the artwork `k` entries
+where it has been getting `k-1`, which on a three-thread budget is half as many
+again for the drawing. That may be the whole fix — a colour that merged under
+the old budget separates on its own under the new one, with nothing built. So
+the precondition for starting C3 is evidence, not appetite: **B8 has landed, and
+a colour that matters is still merged at the profile's own budget.** If nothing
+is, this step does not happen.
+
+**What it is for, when the evidence does arrive.** Freeing a thread does not let
+you say where it goes. `quantise_lab` picks which box to split by `spread`,
+which is count-weighted squared error, so the entry goes where *population* is
+rather than where meaning is: a hero's cape at 4% of the image loses to a
+skin-tone gradient at 25%, every time and correctly by the quantiser's own
+lights. Pinning is how a person overrules that, and it is the only mechanism
+here that does.
+
+**The change is small, and it fits the grain rather than cutting across it.**
+The Lloyd loop recomputes every entry from its cluster on each pass; pinning is
+holding one index fixed across those passes. `representative()` already returns
+a real colour out of the image rather than a cluster mean — the palette is
+*already* made of colours somebody's artwork actually contains, so "this entry
+is a colour someone chose" is a thing it knows how to be. Two guards go with it:
+
+- `_merge_indistinguishable` must never drop a pinned entry. Where another entry
+  sits within a just-noticeable difference of a pinned one, **the other one
+  goes** — the merge still happens, the survivor is decided.
+- `_fewer_colours` must never spend a pinned colour. The retry knob reduces the
+  unpinned budget, and stops when only pinned entries are left rather than
+  quietly discarding the thing it was told to protect.
+
+**What it cannot do, stated before anyone tries it.** If two regions are the
+*same colour in the source*, no quantiser setting separates them — they are one
+colour, and the quantiser is right. Splitting those is selecting geometry: B5's
+subpath surgery could make the cut, and the hard part is hit-testing a click to
+a subpath. That is editor-shaped work and this phase has already declined it.
+
+**Done when:**
+
+- a picked colour survives to the finished document **as its own layer**, at the
+  profile's own budget, on an image where it does not today;
+- the retry loop lowers the budget without ever spending a pinned entry;
+- a pinned entry survives `_merge_indistinguishable` against a neighbour inside
+  the JND, and the neighbour is the one that goes;
+- **pinning nothing produces byte-identical output to B8.** Same gate B8 sets
+  against B7: the new branch may not move the old one.
+
 ---
 
 ## Sequencing
@@ -1773,16 +2046,36 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
    ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED     ✅ CLEARED    ✅ CLEARED
-B0 tracer spike ────┤
-   ✅ CLEARED       │
-B2 triage ──────────┘
-   ✅ CLEARED
+B0 tracer spike ────┤                                                                  │
+   ✅ CLEARED       │                                                                   │
+B2 triage ──────────┘                                                                  │
+   ✅ CLEARED                                                                           │
+                                    ┌──────────────────────────────────────────────────┘
+                                    │
+                                    B8 background ──┬── C1 layer panel ── C2 recolour
+                                     ⬜ NOT STARTED  │    ⬜ NOT STARTED     ⬜ DEFERRED
+                                                    │
+                                                    └── C3 pin a colour
+                                                         ⬜ GATED ON B8's numbers
 ```
 
 A0/A1 are independent of each other, as are B0 and B2. B1 turned out *not* to be
 parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
+
+B8 → C1 is a chain for a reason worth stating: C1 is B8's exclusion with a human
+choosing the index, so building C1 first would mean building that mechanism in
+the UI and then moving it. C2 shares nothing with either and could be done at any
+point — it is last because it is the least useful of the three, not because
+anything blocks it.
+
+**C3 hangs off B8 by evidence rather than by code.** Nothing in it needs C1, and
+it could be built the day after B8 lands — but it should not be, because B8 may
+remove the reason for it. It is the one step here whose gate is a measurement
+someone takes *before* starting rather than a bar the finished work has to
+clear, and that is on purpose: it is the difference between a roadmap written
+from use and one written from appetite.
 
 **Where Phase B stands: it is finished.** B0 through B7 are done, and what they
 add up to is one command: `svgemb convert photo.jpg -o design.svg` takes an
@@ -1798,11 +2091,24 @@ that does not is 1 px line art, which is what it was drawn to be.
 
 **B7 closed it**: the same journey on a phone, with a triage panel, attempt
 list, previews and sliders instead of flags — and the conversion handed to the
-checker and its repairs on the same page. Both phases are complete.
+checker and its repairs on the same page.
 
-The corpus is also still asking for two things nobody planned: a **deskew**
+**And then B8 reopened it**, which is what a roadmap written from use looks
+like. Running the finished pipeline on real artwork showed that every conversion
+of a design on paper spends one of the shop's threads on the paper — a defect no
+step planned for, because every step assumed a palette entry is a thread. B8 is
+the pipeline half (identify the background, exclude it, hand the freed thread
+back to the artwork) and Phase C is the half where a person picks the index
+instead of the corner fill. Neither is a new mechanism: B8 is the first
+"do not stitch this colour", and C1 is the same operation with a human at the
+controls.
+
+The corpus is also still asking for three things nobody planned: a **deskew**
 stage (the only triage miss left is `scan-skewed`, and nothing measures
-rotation) and **EXIF orientation** (deferred out of B3, see there).
+rotation), **EXIF orientation** (deferred out of B3, see there), and now a
+**`paper-minority`** fixture — every corpus image has its ground as the largest
+area, so the one case where dropping a background is not free is the one case
+nothing tests.
 
 ## Risks, named up front
 
@@ -1814,3 +2120,5 @@ rotation) and **EXIF orientation** (deferred out of B3, see there).
 | Photos make bad embroidery, users blame the tool | B2 triage sets expectations *before* conversion |
 | Tuning turns into endless guesswork | B1's metric table lands before any tuning work |
 | Auto-fix quietly changes design intent | Every fix is reported; `--dry-run` shows the diff; nothing overwrites without a flag |
+| A dropped background is indistinguishable from a hole | B8 decides this once: `gaps` excludes the region that was dropped on purpose, so the column keeps answering the question it was built for — did a seam open — rather than reporting the transparency as a defect |
+| Hand-editing lets the user make an unstitchable file | C1 re-traces rather than editing the document, so every result is a conversion the checker has passed judgement on, and the page re-checks it |

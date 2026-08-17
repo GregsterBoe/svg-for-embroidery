@@ -35,7 +35,7 @@ everywhere else in the project.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -74,10 +74,11 @@ RATIO_EPSILON = 0.0005
 #: misread — a new column it cannot supply, or a new condition it never
 #: recorded. 2: B4's ``gaps`` column and the seam overlap the run was taken at.
 #: 3: B5's ``passes`` column, which was declared empty from the start, and the
-#: cleanup the run was taken with. An old baseline is refused with the command
-#: to re-record it, rather than diffed against and reported as twenty
-#: regressions.
-BASELINE_VERSION = 3
+#: cleanup the run was taken with. 4: B6's ``tries`` column, the conversion
+#: loop, and the profile a run was aimed at. An old baseline is refused with
+#: the command to re-record it, rather than diffed against and reported as
+#: twenty regressions.
+BASELINE_VERSION = 4
 
 
 class BenchError(Exception):
@@ -196,6 +197,9 @@ METRICS: Sequence[Metric] = (
     Metric("passes", "passes", 6, "text", "",
            "does the traced SVG pass its profile — 'yes', or how many errors are "
            "left (B5; B6 adds the retry that argues with the answer)"),
+    Metric("tries", "tries", 5, "int", "lower",
+           "conversions the loop needed before the document passed, or before it "
+           "ran out of settings to change (B6)"),
 )
 
 METRIC_BY_KEY = {metric.key: metric for metric in METRICS}
@@ -231,6 +235,9 @@ class Measurement:
     fit: Optional[float] = None
     gaps: Optional[float] = None
     passes: Optional[str] = None
+    #: How many times B6's loop had to trace this image. One means the first
+    #: settings worked; empty means the row was not converted, only traced.
+    tries: Optional[int] = None
     #: Wall-clock seconds the tracer took on this image. Deliberately *not* a
     #: metric: it is a property of the machine as much as of the code, and
     #: putting it in the baseline would make every run a regression. It is
@@ -399,6 +406,56 @@ def trace_row(
     row.gaps = show_through(shot).area
 
 
+def convert_row(
+    row: Measurement,
+    source,
+    reduced: Quantisation,
+    profile: Profile,
+    backend: TracerBackend,
+    tries: Optional[int] = None,
+) -> None:
+    """Fill in the trace columns from B6's loop rather than from a single trace.
+
+    The difference from :func:`trace_row` is the *whole* of B6: the same three
+    stages run, and then the result is checked and the settings adjusted until
+    it passes or the loop runs out of arguments. So ``paths``, ``nodes`` and
+    ``passes`` describe the document a shop would actually be sent, and the new
+    ``tries`` column says what it cost to get there.
+
+    ``fit`` is still measured against the row's own quantisation — the image as
+    this profile's colour budget allows it — so a retry that dropped a colour
+    is visible as the concession it is, rather than being graded against its
+    own reduced palette and scoring well for it.
+    """
+    from .convert import ConvertError, convert
+
+    try:
+        conversion = convert(
+            source, profile, backend=backend, name=row.name,
+            **({} if tries is None else {"tries": tries}),
+        )
+    except ConvertError as exc:
+        row.notes.append(f"paths: not converted — {exc}")
+        return
+
+    svg = conversion.svg
+    row.tries = conversion.tries
+    row.passes = "yes" if conversion.passes else f"{len(conversion.best.errors)} err"
+    row.paths, row.nodes = measure_svg(svg)
+    row.trace_seconds = round(sum(attempt.seconds for attempt in conversion.attempts), 4)
+    row.notes.extend(conversion.notes())
+
+    shot = render(svg, width=reduced.width)
+    if shot is None:
+        row.notes.append(
+            "fit: not measurable — converting worked, but no renderer is installed "
+            "to compare the result against the source"
+        )
+        return
+    row.fit = compare_rasters(reduced.raster(), shot).ratio
+    row.gaps = show_through(shot).area
+
+
 def measure(
     entry: CorpusEntry,
     work_side: Optional[int] = None,
@@ -406,6 +463,8 @@ def measure(
     preprocess: bool = False,
     overlap: int = DEFAULT_OVERLAP,
     cleanup: bool = False,
+    convert: bool = False,
+    tries: Optional[int] = None,
 ) -> Measurement:
     """Everything B1 can say about one image, plus what B0's tracer makes of it.
 
@@ -414,6 +473,11 @@ def measure(
     tracer traces the Lab quantisation rather than the RGB one. That is a
     different question from the raw run, not a better answer to the same one, so
     :func:`incomparable` refuses to diff the two.
+
+    ``convert`` and ``preprocess`` are separate flags here and tied together by
+    the command, deliberately: the loop preprocesses at its own settings, so a
+    row whose image columns describe one pipeline and whose document came from
+    another is a row nobody can read.
     """
     row = Measurement(
         name=entry.name, category=entry.category, expect=entry.expect, profile=entry.profile
@@ -469,7 +533,12 @@ def measure(
             f"kernel asks {scale.kernel_mm:.1f} mm, not the profile's {scale.min_mm:.1f} mm"
         )
 
-    if backend is not None:
+    if backend is not None and convert:
+        # From the source rather than from `work`: the loop does its own
+        # preprocessing, at its own settings, and may enlarge a small image
+        # first — which is the one thing measuring must not do.
+        convert_row(row, source, reduced, profile, backend, tries=tries)
+    elif backend is not None:
         trace_row(
             row,
             reduced,
@@ -546,6 +615,15 @@ class BenchRun:
     #: reason again: it is meant to move ``paths`` and ``nodes``, so a run with
     #: it and a run without it are answers to different questions.
     cleanup: bool = False
+    #: Whether B6's loop produced each document, retries and all. It implies
+    #: the two above and can change the canvas and the palette on top, so it is
+    #: the strongest condition of the lot and diffed like the rest of them.
+    convert: bool = False
+    #: Set when every entry was aimed at one profile instead of the one its
+    #: manifest names. The profile decides the colour budget, the resolution
+    #: and what counts as too fine, so a run at a different one is measuring a
+    #: different question — the same reason the resolution is recorded.
+    profile: str = ""
 
     @property
     def measured(self) -> List[Measurement]:
@@ -581,6 +659,8 @@ class BenchRun:
             "preprocess": self.preprocess,
             "overlap": self.overlap,
             "cleanup": self.cleanup,
+            "convert": self.convert,
+            "profile": self.profile,
             "averages": self.averages(),
             "rows": {row.name: row.to_dict() for row in self.rows},
         }
@@ -608,6 +688,17 @@ def resolve_backend(name: Optional[str]) -> Optional[TracerBackend]:
     return default_backend()
 
 
+def with_profile(entries: Sequence[CorpusEntry], name: str) -> List[CorpusEntry]:
+    """Aim the whole corpus at one profile, whatever each entry names.
+
+    The manifest's own profile is the right default — a metric like "too thin
+    to stitch" means too thin *for that shop* — but a gate stated at one
+    profile has to be runnable at that profile, and B6's is: 80% of the good
+    and marginal images at ``embroidery-strict``.
+    """
+    return [replace(entry, profile=name) for entry in entries]
+
+
 def run(
     entries: Sequence[CorpusEntry],
     work_side: Optional[int] = None,
@@ -616,6 +707,9 @@ def run(
     preprocess: bool = False,
     overlap: int = DEFAULT_OVERLAP,
     cleanup: bool = False,
+    convert: bool = False,
+    tries: Optional[int] = None,
+    profile: str = "",
 ) -> BenchRun:
     """Measure every entry. ``backend=None`` means *do not trace*, not *pick one*.
 
@@ -623,6 +717,8 @@ def run(
     :func:`resolve_backend`), so that calling this directly — from a test, or
     from another tool — gives the same numbers on every machine.
     """
+    if profile:
+        entries = with_profile(entries, profile)
     return BenchRun(
         rows=[
             measure(
@@ -632,6 +728,8 @@ def run(
                 preprocess=preprocess,
                 overlap=overlap,
                 cleanup=cleanup,
+                convert=convert,
+                tries=tries,
             )
             for entry in entries
         ],
@@ -642,6 +740,8 @@ def run(
         preprocess=preprocess,
         overlap=overlap,
         cleanup=cleanup,
+        convert=convert,
+        profile=profile,
     )
 
 
@@ -729,6 +829,19 @@ def incomparable(baseline: Dict[str, Any], current: BenchRun) -> List[str]:
                 f"{'after B5 cleaned it' if was else 'as the tracer left it'}, this run "
                 f"{'after B5 cleaned it' if now else 'as the tracer left it'}"
             )
+        was, now = bool(baseline.get("convert", False)), current.convert
+        if was != now:
+            reasons.append(
+                f"conversion: baseline traced each image "
+                f"{'through B6’s retry loop' if was else 'once'}, this run "
+                f"{'through B6’s retry loop' if now else 'once'}"
+            )
+    was, now = baseline.get("profile", ""), current.profile
+    if was != now:
+        reasons.append(
+            f"profile: baseline aimed the corpus at {was or 'each image’s own profile'}, "
+            f"this run at {now or 'each image’s own profile'}"
+        )
     return reasons
 
 
@@ -808,6 +921,45 @@ def disagreements(bench: BenchRun) -> List[Measurement]:
     return [row for row in graded(bench) if row.verdict != row.expect]
 
 
+#: What share of the images a human called convertible must come out of B6's
+#: loop passing their profile, unattended. The roadmap's gate for the step.
+CONVERSION_BAR = 0.80
+
+
+def convertible(bench: BenchRun) -> List[Measurement]:
+    """Rows a human said were worth converting — B6 is graded on these.
+
+    Not the whole corpus: half of it is photographs and gradients that the
+    roadmap says should *not* become embroidery, and a loop scored on those
+    would be rewarded for converting them.
+    """
+    return [row for row in bench.measured if row.expect in ("good", "marginal")]
+
+
+def _conversion_grading(bench: BenchRun) -> List[str]:
+    """B6's gate, printed with the run rather than left to a test."""
+    rows = [row for row in convertible(bench) if row.passes]
+    if not bench.convert or not rows:
+        return []
+    passing = [row for row in rows if row.passes == "yes"]
+    share = len(passing) / len(rows)
+    icon = "✅" if share >= CONVERSION_BAR else "❌"
+    lines = [
+        f"{icon} converted {len(passing)}/{len(rows)} of the images a human called "
+        f"good or marginal ({share:.0%}, bar is {CONVERSION_BAR:.0%})"
+    ]
+    for row in rows:
+        if row.passes != "yes":
+            lines.append(f"ℹ️  {row.name}  {row.expect}, but still {row.passes}")
+    retried = [row for row in rows if (row.tries or 1) > 1]
+    if retried:
+        lines.append(
+            "ℹ️  retried: "
+            + ", ".join(f"{row.name} ({row.tries})" for row in retried)
+        )
+    return lines
+
+
 def _grading(bench: BenchRun) -> List[str]:
     rows = graded(bench)
     if not rows:
@@ -877,20 +1029,30 @@ def render_table(bench: BenchRun, color: bool = True) -> str:
     traced = (
         f"traced with {bench.tracer} {bench.tracer_version}".rstrip()
         + f", layers grown {bench.overlap}px"
-        + (", cleaned up (B5)" if bench.cleanup else ", as the tracer left it")
+        + (
+            ", converted with retries (B6)"
+            if bench.convert
+            else ", cleaned up (B5)" if bench.cleanup else ", as the tracer left it"
+        )
         if bench.tracer
         else "no tracer here"
     )
     prepared = "preprocessed (B3)" if bench.preprocess else "as handed in"
-    lines.append(f"{summary}  ·  {resolution}  ·  {prepared}  ·  {traced}")
+    aimed = f"  ·  aimed at {bench.profile}" if bench.profile else ""
+    lines.append(f"{summary}  ·  {resolution}  ·  {prepared}  ·  {traced}{aimed}")
     lines.extend(_grading(bench))
+    lines.extend(_conversion_grading(bench))
     if bench.unmeasured:
         lines.append(
             "ℹ️  A format this machine cannot decode is a row you don't get, not a "
             "failed run."
         )
     text = "\n".join(lines)
-    return text if color else text.replace("ℹ️", "[note]")
+    if color:
+        return text
+    return (
+        text.replace("ℹ️", "[note]").replace("✅", "[ok]").replace("❌", "[fail]")
+    )
 
 
 def render_changes(changes: Sequence[Change], color: bool = True) -> str:

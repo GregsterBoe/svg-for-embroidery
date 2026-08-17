@@ -62,6 +62,13 @@ svgemb assess photo.jpg -v                     # every reading, not just the dec
 svgemb assess photo.jpg --strict               # "marginal" counts as a failure
 svgemb assess --explain                        # the bands and their thresholds
 
+svgemb convert logo.png -o design.svg          # image → embroidery-ready SVG (B6)
+svgemb convert logo.png                        # what it would produce; writes nothing
+svgemb convert logo.png -p embroidery-strict   # aimed at a particular shop
+svgemb convert logo.png -v                     # every stage, every retry
+svgemb convert logo.png --no-retry             # one pass, no adjusting
+svgemb convert logo.png --stdout > design.svg  # for a pipe (the report goes to stderr)
+
 svgemb profiles                                # list all rulesets
 svgemb profiles example-shop                   # show one ruleset's rules
 svgemb rules                                   # list all checks and their parameters
@@ -70,6 +77,7 @@ svgemb bench                                   # measure the image corpus (B1)
 svgemb bench --preprocess                      # the same, after B3 cleans each image
 svgemb bench --tracers                         # compare every installed tracer (B0)
 svgemb bench --overlap 0                       # trace butt joints, to see the seams (B4)
+svgemb bench --convert -p embroidery-strict    # B6's gate: how many convert unattended
 
 svgemb serve                                   # local web UI on http://localhost:8000
 svgemb roundtrip design.svg                    # verify read/write changes nothing
@@ -79,7 +87,9 @@ svgemb doctor                                  # what this machine can do
 Exit codes: `0` pass, `1` the file violates the ruleset, `2` usage/configuration
 error (so it drops straight into CI). `svgemb fix` adds `3` — svgemb caught its
 own output misbehaving and refused to write it. `svgemb assess` returns `1` for
-a hopeless image (and, with `--strict`, a marginal one).
+a hopeless image (and, with `--strict`, a marginal one). `svgemb convert`
+returns `1` when the SVG it produced still does not pass, and `3` for the same
+verification failure as `fix`.
 
 As a library:
 
@@ -412,7 +422,11 @@ Check any of it against your own files:
 svgemb roundtrip ~/designs -r
 ```
 
-### Phase B has started: images → SVG
+### Phase B: images → SVG, all but the UI
+
+`svgemb convert image.png -o design.svg` is the whole phase seen from outside:
+B0–B6 are done, and B7 — the same journey on a phone, with previews and sliders
+— is what is left. The steps behind it:
 
 **B1 — the measuring instrument, built before the thing it measures.** The
 premise of Phase B is that quality comes from preprocessing, not from the
@@ -733,6 +747,56 @@ profile checks colours and structure rather than detail. **Passing a profile is
 not the same as being worth stitching**, which is what the `verdict` column
 beside it is for. B6 owns the interesting half: retrying with different settings
 when the answer is no.
+
+**B6 — closing the loop, and arguing with the answer.** One command runs the
+whole phase and then does something a single pass cannot: when the result still
+fails, it changes a setting and traces again.
+
+```bash
+svgemb convert logo.png -p embroidery-strict -o design.svg
+```
+
+```
+try 1  8.0 cm, 2 colour(s)    ❌ 1 error(s)   [geometry.min_feature_size]
+       <path> has detail finer than 1.5 mm (14% of its area).
+       ↻ stitched larger: 8.0 → 12.0 cm; the artwork is unchanged, only the
+         size it is sewn at
+try 2  12.0 cm, 2 colour(s)   ✅ passes
+✅ converted at 12.0 cm: 2 colour(s), 24 shape(s), 213 node(s), 2 attempt(s)
+```
+
+**Detail below the needle is a size problem before it is a shape problem.** The
+plan called for a bigger morphology kernel; growing artwork invents shape nobody
+drew, while sewing the same file at 12 cm instead of 8 makes a 1 mm stroke a
+1.5 mm one and changes nothing about the drawing — at a size the *same profile*
+already said it accepts. Three knobs, tried in the order of what they cost the
+artwork: stitch it larger (nothing), absorb specks the profile has already
+called too small to sew (shapes it rejected anyway), drop a colour (the design
+itself). One knob per attempt, so the report can say which change bought which
+improvement.
+
+**A pass is not always the end of it.** Cleanup runs destructively on a document
+nobody drew, so an image can satisfy the profile by having its finest strokes cut
+off — on a test drawing of straight bars, 42% of the ink. That repair is read as
+evidence about the size instead: the loop tries the same image larger and keeps
+whichever result kept more of the drawing. It is also cheaper — a reshaped layer
+comes back as a polyline, so the version that deleted the artwork cost three
+times the nodes.
+
+```bash
+make convert        # or: svgemb bench -p embroidery-strict --convert
+```
+
+```
+✅ converted 13/14 of the images a human called good or marginal (93%, bar is 80%)
+ℹ️  line-art-thin  marginal, but still 1 err
+ℹ️  retried: line-art-thick (2), line-art-thin (4), scan-clean (2), scan-skewed (2)
+```
+
+A single pass managed 11 of those 14. The one image that never converts is 1 px
+line art, which is what it was drawn to be: the run says so, names every size it
+tried, and hands back the attempt that kept the most drawing rather than the
+last one it made.
 
 ### Optional capabilities
 

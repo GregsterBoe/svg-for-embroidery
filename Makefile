@@ -3,7 +3,7 @@
 
 PYTHON ?= python
 
-.PHONY: help test bench bench-save triage prep clean-up tracers corpus roundtrip doctor serve degraded
+.PHONY: help test bench bench-save triage prep clean-up convert tracers corpus roundtrip doctor serve degraded
 
 help:
 	@echo "make test         run the test suite"
@@ -13,6 +13,7 @@ help:
 	@echo "make triage       grade the corpus good/marginal/hopeless (B2)"
 	@echo "make prep         measure the corpus after B3 cleans each image"
 	@echo "make clean-up     ...and again after B5 cleans up what the tracer drew"
+	@echo "make convert      run B6's whole loop over the corpus and grade its gate"
 	@echo "make tracers      compare every installed tracer on the corpus (B0)"
 	@echo "make corpus       regenerate the corpus images"
 	@echo "make roundtrip    prove the writer returns files unchanged (A0 gate)"
@@ -51,6 +52,13 @@ prep:
 # be accepted by the shop it was aimed at.
 clean-up:
 	$(PYTHON) -m svg_embroidery.cli bench --preprocess --cleanup --no-compare
+
+# B6's gate: the whole loop — preprocess, trace, clean up, check, and adjust a
+# setting and try again — over the corpus, aimed at the profile that has an
+# opinion about detail. The line to read is at the foot of the table:
+# "converted N/M of the images a human called good or marginal".
+convert:
+	$(PYTHON) -m svg_embroidery.cli bench -p embroidery-strict --convert --no-compare
 
 # B0's instrument: the same corpus through every tracer this machine has.
 tracers:

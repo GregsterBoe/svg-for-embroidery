@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "created": "2026-08-16T21:09:04Z",
+  "version": 4,
+  "created": "2026-08-17T17:25:21Z",
   "corpus": "/home/gregster/Documents/Projects/embroidery/svg-for-embroidery/bench/corpus",
   "work_side": null,
   "tracer": "potracer",
@@ -8,6 +8,8 @@
   "preprocess": false,
   "overlap": 1,
   "cleanup": false,
+  "convert": false,
+  "profile": "",
   "averages": {
     "flat": 0.49043296602387515,
     "quant": 0.3773375,
@@ -39,7 +41,8 @@
       "fit": 0.0219,
       "gaps": 9.002682799474244e-07,
       "passes": "yes",
-      "trace_seconds": 0.0539,
+      "tries": null,
+      "trace_seconds": 0.0671,
       "unmeasured": "",
       "notes": []
     },
@@ -65,7 +68,8 @@
       "fit": 0.01595,
       "gaps": 5.921764685876392e-05,
       "passes": "yes",
-      "trace_seconds": 0.0335,
+      "tries": null,
+      "trace_seconds": 0.0329,
       "unmeasured": "",
       "notes": []
     },
@@ -91,7 +95,8 @@
       "fit": 0.01735,
       "gaps": 1.0002980888304714e-07,
       "passes": "yes",
-      "trace_seconds": 0.0435,
+      "tries": null,
+      "trace_seconds": 0.0418,
       "unmeasured": "",
       "notes": []
     },
@@ -117,7 +122,8 @@
       "fit": 0.010125,
       "gaps": 4.0011923553218857e-07,
       "passes": "yes",
-      "trace_seconds": 0.0298,
+      "tries": null,
+      "trace_seconds": 0.0287,
       "unmeasured": "",
       "notes": []
     },
@@ -143,7 +149,8 @@
       "fit": 0.050825,
       "gaps": 4.0011923553218855e-06,
       "passes": "yes",
-      "trace_seconds": 0.0993,
+      "tries": null,
+      "trace_seconds": 0.0981,
       "unmeasured": "",
       "notes": []
     },
@@ -169,7 +176,8 @@
       "fit": 0.053625,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0648,
+      "tries": null,
+      "trace_seconds": 0.0645,
       "unmeasured": "",
       "notes": []
     },
@@ -195,7 +203,8 @@
       "fit": 0.692525,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 1.075,
+      "tries": null,
+      "trace_seconds": 1.054,
       "unmeasured": "",
       "notes": []
     },
@@ -221,7 +230,8 @@
       "fit": 0.08975,
       "gaps": 2.350700508751608e-05,
       "passes": "yes",
-      "trace_seconds": 0.5223,
+      "tries": null,
+      "trace_seconds": 0.5179,
       "unmeasured": "",
       "notes": []
     },
@@ -247,7 +257,8 @@
       "fit": 0.399275,
       "gaps": 1.5304560759106214e-05,
       "passes": "yes",
-      "trace_seconds": 0.5465,
+      "tries": null,
+      "trace_seconds": 0.5217,
       "unmeasured": "",
       "notes": []
     },
@@ -273,7 +284,8 @@
       "fit": 0.32455,
       "gaps": 8.202444328409866e-06,
       "passes": "yes",
-      "trace_seconds": 0.539,
+      "tries": null,
+      "trace_seconds": 0.5151,
       "unmeasured": "",
       "notes": []
     },
@@ -299,7 +311,8 @@
       "fit": 0.056,
       "gaps": 5.001490444152357e-07,
       "passes": "yes",
-      "trace_seconds": 0.0971,
+      "tries": null,
+      "trace_seconds": 0.0872,
       "unmeasured": "",
       "notes": []
     },
@@ -325,7 +338,8 @@
       "fit": 0.005,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0191,
+      "tries": null,
+      "trace_seconds": 0.0189,
       "unmeasured": "",
       "notes": []
     },
@@ -351,7 +365,8 @@
       "fit": 0.124625,
       "gaps": 2.0005961776609428e-07,
       "passes": "yes",
-      "trace_seconds": 0.1618,
+      "tries": null,
+      "trace_seconds": 0.1607,
       "unmeasured": "",
       "notes": []
     },
@@ -377,7 +392,8 @@
       "fit": 0.012375,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0346,
+      "tries": null,
+      "trace_seconds": 0.0344,
       "unmeasured": "",
       "notes": []
     },
@@ -403,7 +419,8 @@
       "fit": 0.0206,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0431,
+      "tries": null,
+      "trace_seconds": 0.042,
       "unmeasured": "",
       "notes": []
     },
@@ -429,7 +446,8 @@
       "fit": 0.0,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0196,
+      "tries": null,
+      "trace_seconds": 0.0188,
       "unmeasured": "",
       "notes": []
     },
@@ -455,7 +473,8 @@
       "fit": 0.0211,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0539,
+      "tries": null,
+      "trace_seconds": 0.0495,
       "unmeasured": "",
       "notes": []
     },
@@ -481,7 +500,8 @@
       "fit": 0.1259765625,
       "gaps": 3.485838779956427e-05,
       "passes": "yes",
-      "trace_seconds": 0.0048,
+      "tries": null,
+      "trace_seconds": 0.0038,
       "unmeasured": "",
       "notes": [
         "thin: not measurable — at 3.12 mm/px the smallest kernel asks 9.4 mm, not the profile's 1.5 mm"
@@ -509,7 +529,8 @@
       "fit": 0.013425,
       "gaps": 0.0,
       "passes": "yes",
-      "trace_seconds": 0.0387,
+      "tries": null,
+      "trace_seconds": 0.0376,
       "unmeasured": "",
       "notes": []
     },
@@ -535,7 +556,8 @@
       "fit": 0.017025,
       "gaps": 2.8408465722785393e-05,
       "passes": "yes",
-      "trace_seconds": 0.0387,
+      "tries": null,
+      "trace_seconds": 0.0372,
       "unmeasured": "",
       "notes": []
     }

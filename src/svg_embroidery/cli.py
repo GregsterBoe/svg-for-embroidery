@@ -237,6 +237,27 @@ def build_parser() -> argparse.ArgumentParser:
         "come out; the 'passes' column says whether the result satisfies the "
         "profile either way",
     )
+    bench.add_argument(
+        "--convert",
+        action="store_true",
+        help="run B6's whole loop on each image — preprocess, trace, clean up, "
+        "check, and adjust a setting and try again when it still fails; implies "
+        "--preprocess and --cleanup, and fills the 'tries' column",
+    )
+    bench.add_argument(
+        "--tries",
+        type=int,
+        metavar="N",
+        help="with --convert, how many attempts each image gets",
+    )
+    bench.add_argument(
+        "-p",
+        "--profile",
+        metavar="NAME",
+        help="aim every image at this profile instead of the one its manifest "
+        "names; the profile sets the colour budget and what counts as too fine, "
+        "so such a run is never diffed against a baseline taken at another",
+    )
     bench.add_argument("--explain", action="store_true", help="describe the columns and exit")
     bench.add_argument("--json", action="store_true", help="machine readable output")
     bench.add_argument("--no-color", action="store_true", help="plain text, no icons")
@@ -281,6 +302,65 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--json", action="store_true", help="machine readable output")
     assess.add_argument("--no-color", action="store_true", help="plain ASCII output")
     assess.add_argument(
+        "-r", "--recursive", action="store_true", help="descend into directories"
+    )
+
+    # Imported here rather than at the top so that the number in the help text
+    # and the number the loop uses cannot drift apart.
+    from .convert import DEFAULT_TRIES as CONVERT_TRIES
+
+    convert = subparsers.add_parser(
+        "convert",
+        help="turn an image into an embroidery-ready SVG (B6)",
+        description=(
+            "Preprocess, trace, clean up and check — and when the result still fails, "
+            "change one setting and try again. Nothing is written unless you say "
+            "where: -o or --stdout."
+        ),
+        epilog=(
+            "Exit codes: 0 the SVG passes its profile, 1 it does not, 2 a usage or "
+            "file error, 3 svgemb caught its own output misbehaving."
+        ),
+    )
+    convert.add_argument("files", nargs="+", type=Path, help="image file(s) or directories")
+    convert.add_argument(
+        "-p",
+        "--profile",
+        default=DEFAULT_PROFILE,
+        help=f"profile name or path to a YAML ruleset (default: {DEFAULT_PROFILE})",
+    )
+    destination = convert.add_mutually_exclusive_group()
+    destination.add_argument(
+        "-o", "--output", type=Path, metavar="FILE", help="write the SVG here (one input)"
+    )
+    destination.add_argument(
+        "--stdout", action="store_true", help="write the SVG to stdout"
+    )
+    convert.add_argument(
+        "--tracer",
+        metavar="NAME",
+        help="which tracer draws the paths: potrace, potracer, vtracer; "
+        "by default the best one installed here",
+    )
+    convert.add_argument(
+        "--tries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="how many times a failing conversion may adjust a setting and trace "
+        f"again (default: {CONVERT_TRIES})",
+    )
+    convert.add_argument(
+        "--no-retry",
+        action="store_true",
+        help="convert once and report the verdict, without adjusting anything",
+    )
+    convert.add_argument(
+        "-v", "--verbose", action="store_true", help="show what every stage did"
+    )
+    convert.add_argument("--json", action="store_true", help="machine readable output")
+    convert.add_argument("--no-color", action="store_true", help="plain ASCII output")
+    convert.add_argument(
         "-r", "--recursive", action="store_true", help="descend into directories"
     )
 
@@ -752,15 +832,40 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     if overlap < 0:
         print("error: --overlap cannot be negative", file=sys.stderr)
         return 2
+    if args.tries is not None and args.tries < 1:
+        print("error: --tries needs at least one attempt", file=sys.stderr)
+        return 2
+    if args.convert and args.tracers:
+        # The loop adjusts settings per image until the profile is satisfied, so
+        # two tracers would be compared at whatever settings each of them needed
+        # — which is not a comparison of the tracers.
+        print(
+            "error: --tracers compares one pass per tracer; --convert changes the "
+            "settings per image, so the two answer different questions",
+            file=sys.stderr,
+        )
+        return 2
+    if args.profile:
+        try:
+            load_profile(args.profile)  # a bad name is a usage error, not 20 empty rows
+        except ProfileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        entries = bench_module.with_profile(entries, args.profile)
+    # The loop *is* preprocessing, tracing and cleanup, so asking for it asks
+    # for those: a row where the columns describe one pipeline and the document
+    # came from another is a row nobody can read.
+    preprocess = args.preprocess or args.convert
+    cleanup = args.cleanup or args.convert
 
     if args.tracers:
         runs = bench_module.compare_tracers(
             entries,
             work_side=args.work_side,
             corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
-            preprocess=args.preprocess,
+            preprocess=preprocess,
             overlap=overlap,
-            cleanup=args.cleanup,
+            cleanup=cleanup,
         )
         print(bench_module.render_tracer_comparison(runs, color=color))
         return 0
@@ -776,9 +881,12 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         work_side=args.work_side,
         corpus=str(args.corpus or bench_module.DEFAULT_CORPUS),
         backend=backend,
-        preprocess=args.preprocess,
+        preprocess=preprocess,
         overlap=overlap,
-        cleanup=args.cleanup,
+        cleanup=cleanup,
+        convert=args.convert,
+        tries=args.tries,
+        profile=args.profile or "",
     )
 
     # A subset run must never overwrite a whole-corpus baseline with three rows.
@@ -935,6 +1043,123 @@ def _cmd_assess(args: argparse.Namespace) -> int:
     return 1 if any(verdict in bad for verdict in verdicts) else 0
 
 
+def _cmd_convert(args: argparse.Namespace) -> int:
+    from .convert import ConvertError, convert_file, render_conversion, render_json
+
+    try:
+        profile = load_profile(args.profile)
+        Checker(profile)  # a bad parameter is a usage error, before any work
+    except (ProfileError, RuleConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json and args.stdout:
+        print("error: --json and --stdout both claim stdout; pick one", file=sys.stderr)
+        return 2
+    tries = 1 if args.no_retry else (args.tries if args.tries is not None else None)
+    if tries is not None and tries < 1:
+        print("error: --tries needs at least one attempt", file=sys.stderr)
+        return 2
+
+    files = _collect_images(args.files, args.recursive)
+    missing = [path for path in files if not path.exists()]
+    for path in missing:
+        print(f"error: no such file: {path}", file=sys.stderr)
+    files = [path for path in files if path.exists()]
+    # An SVG is what this command *produces*; handing it one is a different job.
+    vectors = [path for path in files if path.suffix.lower() == ".svg"]
+    if vectors:
+        print(
+            f"error: {vectors[0]} is already a vector — 'svgemb fix' is the one that "
+            "repairs SVG files; convert takes the image you want turned into one",
+            file=sys.stderr,
+        )
+        return 2
+    if not files:
+        if not missing:
+            print("error: no images found", file=sys.stderr)
+        return 2
+    if len(files) > 1 and (args.output or args.stdout):
+        print(
+            "error: -o/--stdout take a single input; convert one image at a time",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Whatever claims stdout — the SVG, or the JSON — the report moves aside.
+    stream = sys.stderr if (args.stdout or args.json) else sys.stdout
+
+    from .tracer import TracerError, backend_named
+
+    try:
+        backend = None
+        if args.tracer:
+            backend = backend_named(args.tracer)
+            if not backend.available():
+                raise TracerError(
+                    f"tracer {args.tracer} is not available here — {backend.install}"
+                )
+        conversions = [
+            convert_file(
+                path,
+                profile,
+                backend=backend,
+                **({} if tries is None else {"tries": tries}),
+            )
+            for path in files
+        ]
+    except (ConvertError, TracerError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(render_json(conversions))
+    else:
+        for index, conversion in enumerate(conversions):
+            if index:
+                print(file=stream)
+            print(
+                render_conversion(
+                    conversion, verbose=args.verbose, color=not args.no_color
+                ),
+                file=stream,
+            )
+
+    written = _write_converted(args, conversions[0], stream)
+    if written is None and not args.stdout and not args.json:
+        print(
+            "(nothing written: pass -o FILE or --stdout to keep the SVG)"
+            if len(conversions) == 1
+            else "(nothing written: -o takes one image at a time)",
+            file=stream,
+        )
+
+    if any(not conversion.ok for conversion in conversions):
+        return EXIT_VERIFICATION_FAILED
+    return 0 if all(conversion.passes for conversion in conversions) else 1
+
+
+def _write_converted(args: argparse.Namespace, conversion, stream) -> Optional[Path]:
+    """Put the SVG where the flags say, or nowhere.
+
+    Nothing is written without being asked, which is the same rule ``svgemb
+    fix`` follows. It matters less here — the input is an image and the output
+    is a new file — but a bare ``svgemb convert`` is then a preview of what you
+    would get, and the flag is the difference between looking and keeping.
+    """
+    if not conversion.ok:
+        return None
+    if args.stdout:
+        print(conversion.svg, end="")
+        return None
+    if args.output is None:
+        return None
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(conversion.svg, encoding="utf-8")
+    print(f"wrote {args.output}", file=stream)
+    return args.output
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve  # imported lazily: only the CLI needs http.server
 
@@ -965,6 +1190,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_bench(args)
     if args.command == "assess":
         return _cmd_assess(args)
+    if args.command == "convert":
+        return _cmd_convert(args)
     if args.command == "serve":
         return _cmd_serve(args)
     parser.print_help()

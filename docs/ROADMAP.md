@@ -835,6 +835,7 @@ judgement on real scans. Real images can be dropped in alongside.
 | `gaps` | share of the traced SVG with no paint on it at all — the seams between colour layers (B4) | lower |
 | `verdict` | triage's good/marginal/hopeless, next to `expect` (B2) | — |
 | `passes` | does the traced SVG pass its profile — filled by B5 | — |
+| `tries` | conversions the loop needed to get there — filled by B6 | lower |
 
 Declaring a column before it can be filled is deliberate: the baseline grades it
 from the first run that fills it in, rather than needing the harness changed
@@ -1473,11 +1474,130 @@ machinery.
 > unusable for multi-rule runs, since `--only` narrows the run as well as naming
 > the rule. Any future destructive repair on a widely-used rule has to ask.
 
-### B6. Close the loop · size M
+### B6. Close the loop · ✅ CLEARED
 
 ```bash
 svgemb convert photo.jpg -p embroidery-basic -o design.svg
 ```
+
+Lives in `convert.py`, behind `svgemb convert` and `svgemb bench --convert`.
+Everything B0–B5 built is a stage; B6 runs them and then **argues with the
+answer**.
+
+**Gate met.** `make convert` (`svgemb bench -p embroidery-strict --convert`):
+
+```
+✅ converted 13/14 of the images a human called good or marginal (93%, bar is 80%)
+ℹ️  line-art-thin  marginal, but still 1 err
+ℹ️  retried: line-art-thick (2), line-art-thin (4), scan-clean (2), scan-skewed (2)
+```
+
+B5 left this at 11/14 — 79% against a bar of 80%, one image short on
+purpose-built material. Two of the three misses convert on the *first* retry,
+and the corpus's mean `fit` improves from 0.056 to 0.052 rather than being
+traded away for the pass rate.
+
+**The knob that mattered is not one the plan named.** The plan offered *too many
+colours → lower `k`; too many paths → simplify harder; details too fine →
+larger morphology kernel*. Every miss was the third case, and the morphology
+kernel is the wrong answer to it: growing artwork invents shape the designer did
+not draw, which is the thing A5 refused to do when it declined to "thicken" a
+hairline. **The honest knob is the size the design is sewn at.** A 0.4 mm stroke
+at 8 cm is a 1.5 mm stroke at 30 cm; the document is not touched at all, and the
+profile that rejects it at its smallest canvas accepts the same file at a larger
+one — because the profile said so itself, in `geometry.canvas_size`. The retry
+is reading a limit the shop already wrote down, not inventing a concession.
+
+Measured on `line-art-thick`, which is the whole step in one row:
+
+| | at 8.0 cm (B5) | at 12.0 cm (B6) |
+| --- | --- | --- |
+| verdict | ❌ detail finer than 1.5 mm (14% of the path) | ✅ passes |
+| what cleanup did | cut 52% then 14% of the ink away | nothing to cut |
+| shapes / nodes | 20 / 688 | **24 / 213** |
+| `fit` | 0.082 | **0.063** |
+
+Nodes fell by two thirds *because* the design passed honestly: A5's boolean
+repair returns a polyline, so every layer it reshapes comes back without curves.
+The version that deleted artwork was also the version that cost three times the
+stitches.
+
+**The order of the knobs is the design, and it is an order of what a conversion
+may cost the artwork:**
+
+| Knob | What it takes away | Answers |
+| --- | --- | --- |
+| stitch it larger | nothing — the same document, at a size the profile also allows | `geometry.min_feature_size`, `geometry.min_area`, `stroke.min_width` |
+| absorb specks before tracing | regions the profile has already called too small to sew | `path.max_count` |
+| drop a colour | part of the design itself | `color.max_count` |
+
+Each attempt turns exactly **one**, so the report can attribute the improvement
+to the change. The despeckle knob's cap is not a number of ours: it is the
+profile's own `min_area` converted into this attempt's pixels (2.25 mm² at
+0.5 mm/px is nine pixels, and not a tenth), because past that point despeckling
+stops removing specks and starts removing artwork. The colour knob never reaches
+one — a silhouette is not a conversion. A complaint no knob answers stops the
+loop rather than turning something at random.
+
+**A pass is not always the end of it**, and this is the finding that made B6
+more than a retry loop. B5 runs the conversion path destructively by design, so
+a document can satisfy the profile by having the too-fine parts of the drawing
+*cut off*. On a test image of three straight bars that is **42% of the ink** at
+the smallest allowed canvas, and the run reported ✅ with the bars gone. So a
+fine-detail repair is now read as evidence about the **size**: the loop retries
+the same image larger and keeps whichever result kept more of the drawing. The
+same bars at 18 cm lose nothing, and `scan-clean` — which passed at 8 cm after
+cutting 2% of a path — comes back at 12 cm with **18 shapes instead of 7 and
+132 nodes instead of 273**. Only the *reshaping* repair counts as a loss;
+`geometry.min_area` drops specks the profile has already declared unsewable in
+millimetres, which is B5's question-answered-in-advance rather than artwork.
+
+**What was measured and rejected: the working resolution.** B5's note suggested
+raising it and tracing again, and it does raise the pass rate — at 224 px
+`line-art-thin` passes at the profile's *smallest* canvas. It passes because the
+destructive repair, given a finer grid, succeeds in deleting the whole ink
+layer: one shape, nine nodes, the drawing gone, and `fit` *improves* to 0.025
+because the source is mostly paper. **A knob that raises the pass rate by
+deleting the artwork is not a knob**, and `fit` cannot be trusted to notice —
+it is the same blind spot B4 caught the tracer in when `turdsize` was quietly
+dropping speckle. The resolution stays where the profile puts it.
+
+**The one image that never converts is the one the corpus built to be
+unconvertible.** `line-art-thin` is 1 px strokes; at 27 cm, 28% of it is still
+finer than the needle. The loop tries 8 → 12 → 18 → 27 cm, says so line by line,
+and then hands back **the attempt that kept the most drawing rather than the
+last one it made** — a change that bought no improvement is a change to hand
+back unmade. That is also why an image nothing works on comes back at the size
+it was asked for.
+
+**Upscaling finally has a home.** B3 built stage 1's `upscale` and could not use
+it, because measuring must not invent pixels; converting must, and the docstring
+had already said so. `lowres-icon` is 32×32, and tracing it at the 160 px the
+profile asks for takes `fit` from 0.126 to **0.047** — nearest-neighbour repeats
+pixels rather than interpolating, so no detail is invented, the tracer just has
+room to follow a boundary.
+
+**Two additions to the benchmark, both needed to state the gate rather than
+assert it.** `--convert` runs the loop instead of a single trace and fills the
+new `tries` column; `-p/--profile` aims the whole corpus at one profile instead
+of the one each manifest entry names, which is what makes "80% at
+`embroidery-strict`" a command anybody can run. Both join the list of conditions
+a baseline records and refuses to be diffed across, for the reason B1 gave: they
+move every number, so a diff across them measures the conditions rather than the
+code.
+
+**Nothing is written without being asked** — `-o` or `--stdout`, the rule
+`svgemb fix` follows. It matters less here, since the input is an image and the
+output is a new file, but it makes a bare `svgemb convert photo.png` a preview
+of what you would get. Exit codes match `fix`: `1` when the SVG produced still
+fails its profile, `3` when the engine caught its own output misbehaving.
+
+**Done when** — ~~≥80% of the corpus's "good" and "marginal" images convert to a
+passing SVG unattended, with the metrics to prove it~~ ✅ **93%**, and the run
+prints the grade itself rather than leaving it to a test.
+
+<details>
+<summary>Original plan for this step</summary>
 
 convert → check → fix → re-check, and when it still fails, **adjust and retry
 automatically**: too many colours → lower `k`; too many paths → simplify harder;
@@ -1497,12 +1617,37 @@ raise the working resolution, lower the colour budget, trace again. The corpus
 put the gate one image away on purpose-built material, which is a better
 starting point than this plan assumed.
 
+</details>
+
+> **Still open: what the loop cannot argue with.** `fill.required`,
+> `document.no_raster` and `geometry.aspect_ratio` have no automatic repair
+> (A7's list), and no B6 knob either — a conversion never produces them, so
+> nothing here is worse off, but a profile with an unusual rule can still stop
+> the loop with "no knob answers this". It says exactly that, which is the
+> honest floor.
+
 ### B7. In the UI · size M
 
 Upload an image on the phone → side-by-side preview → sliders for colours and
 detail → live re-check → download the SVG.
 
 **Done when:** the full journey works on a phone, offline.
+
+**What B6 hands it.** The journey already exists as one call: `convert()` takes
+a raster and a profile and returns every attempt it made, the settings each was
+made at, and the document to keep — so the UI's work is presentation, not
+pipeline. Two things follow for the layout. The sliders are the *knobs the loop
+already turns* (size, colours, and how much speckle to absorb), so a slider is
+the user overriding a retry rather than a new setting nobody has thought about;
+and the attempts are the natural before/after pair the page needs, because the
+interesting comparison is not image-versus-SVG but 8 cm-versus-12 cm. B2's
+triage panel is still owed here as well — it was deliberately left out of the UI
+so that this step could lay out the whole journey at once.
+
+The one genuinely new decision is what a phone does about the wait: the loop
+traces up to four times, and on a device that cannot install `potrace` the
+answer is the one the mobile/desktop decision already gave — run `svgemb serve`
+on a machine that can, and let the phone be the client.
 
 ---
 
@@ -1516,7 +1661,7 @@ A1 visual diff ─┘                                        ├── A6 CLI/UI
                     ═══ GATE ═══
                          │
 B1 corpus+metrics ──┬── B3 preprocessing ── B4 tracing ── B5 cleanup ── B6 loop ── B7 UI
-   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED
+   ✅ CLEARED       │      ✅ CLEARED        ✅ CLEARED     ✅ CLEARED     ✅ CLEARED
 B0 tracer spike ────┤
    ✅ CLEARED       │
 B2 triage ──────────┘
@@ -1528,14 +1673,19 @@ parallel with B0 after all: B0's gate is "a spike comparing output **on the
 corpus**", so the corpus has to exist first — which is also why the roadmap
 marks B1 "do this first" despite listing it second. Everything else is a chain.
 
-**Where Phase B stands:** B0 through B5 are done, and what they add up to is a
-pipeline: a scan goes in and a layered, seam-free, cleaned-up SVG comes out that
-`svgemb check` passes. `scan-clean` went from `fit` 0.253 to 0.032, the corpus
-traces with a third of the paths it did and then loses two thirds of *those* to
-cleanup, no image traces with a gap in it any more, and 16 of the 20 images pass
-`embroidery-strict` where 11 did. **B6 is next**, and B5 sized it: the four
-images still failing all fail the same check, on artwork mostly finer than the
-needle, which is the case a retry with different settings exists for.
+**Where Phase B stands:** B0 through B6 are done, and what they add up to is one
+command: `svgemb convert photo.jpg -o design.svg` takes an image, cleans it,
+traces it in layers with no seams, removes what cannot be sewn, checks the
+result against the shop's own rules, and — when it still fails — changes a
+setting the profile already allows and tries again. `scan-clean` went from `fit`
+0.253 to 0.032, the corpus traces with a third of the paths it did and then
+loses two thirds of *those* to cleanup, no image traces with a gap in it any
+more, and **13 of the 14 images a human called convertible now convert
+unattended** at `embroidery-strict`, where a single pass managed 11. The one
+that does not is 1 px line art, which is what it was drawn to be.
+
+**B7 is next**, and it is the only step left in the phase: the same journey on a
+phone, with previews and sliders instead of flags.
 
 The corpus is also still asking for two things nobody planned: a **deskew**
 stage (the only triage miss left is `scan-skewed`, and nothing measures

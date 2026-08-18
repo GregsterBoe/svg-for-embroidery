@@ -362,6 +362,13 @@ def build_parser() -> argparse.ArgumentParser:
         "costs one of the profile's threads",
     )
     convert.add_argument(
+        "--sew-background-holes",
+        action="store_true",
+        help="experimental: sew the ground the artwork closes around — a white "
+        "shirt drawn on white paper — instead of leaving it bare with the rest "
+        "of the background; costs a thread, so the ink budget drops by one",
+    )
+    convert.add_argument(
         "--remove",
         action="append",
         default=[],
@@ -1135,6 +1142,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
                 profile,
                 backend=backend,
                 drop_background=not args.keep_background,
+                sew_background_holes=args.sew_background_holes,
                 remove=remove,
                 **({} if tries is None else {"tries": tries}),
             )

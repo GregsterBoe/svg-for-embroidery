@@ -337,7 +337,7 @@ def test_the_starting_settings_and_slider_ranges_come_from_the_profile(base_url)
     _, body = upload(base_url)
     assert body["settings"] == {
         "canvas_cm": 8.0, "colors": 2, "speck_area": 1, "work_side": 160,
-        "drop_background": True, "remove": [],
+        "drop_background": True, "sew_background_holes": False, "remove": [],
         "describe": "8.0 cm, 2 colour(s)",
     }
     assert body["limits"]["canvas_min_cm"] == 8.0
@@ -687,6 +687,47 @@ def test_the_background_switch_is_a_setting_like_any_other(base_url):
     assert kept["settings"]["drop_background"] is False
     assert not [l for l in kept["layers"] if not l["stitched"]]
     assert ground["color"] in kept["svg"].lower()
+
+
+@needs_tracer
+def test_the_enclosed_ground_switch_travels_with_the_other_settings(base_url, tmp_path):
+    """B9's checkbox, and the row it puts in the panel.
+
+    The two white rows are the point: the page has to be able to say which one
+    is the garment showing through and which one is being sewn, or a repeated
+    swatch reads as a bug rather than as the decision it is.
+    """
+    from svg_embroidery.raster import encode_png  # noqa: PLC0415
+    from test_convert import image  # noqa: PLC0415
+
+    def paint(x, y):
+        distance = ((x - 64) ** 2 + (y - 64) ** 2) ** 0.5
+        return (26, 26, 26, 255) if 25 < distance < 42 else (255, 255, 255, 255)
+
+    ring = tmp_path / "ring.png"
+    ring.write_bytes(encode_png(image(128, 128, paint)))
+
+    _, start = upload(base_url, path=ring, profile="embroidery-basic")
+    _, plain = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-basic", "reset": True},
+    )
+    _, sewn = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-basic",
+         "settings": dict(plain["settings"], sew_background_holes=True)},
+    )
+
+    assert plain["settings"]["sew_background_holes"] is False
+    assert sewn["settings"]["sew_background_holes"] is True
+    assert not [l for l in plain["layers"] if l["enclosed"]]
+
+    inside = [l for l in sewn["layers"] if l["enclosed"]]
+    outside = [l for l in sewn["layers"] if l["reason"] == "background"]
+    assert len(inside) == 1 and inside[0]["stitched"]
+    assert len(outside) == 1 and not outside[0]["stitched"]
+    assert inside[0]["color"] == outside[0]["color"] == "#ffffff"
+    assert "#ffffff" in sewn["svg"].lower()
 
 
 @needs_tracer

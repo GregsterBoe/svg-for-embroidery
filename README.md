@@ -68,6 +68,7 @@ svgemb convert logo.png -p embroidery-strict   # aimed at a particular shop
 svgemb convert logo.png -v                     # every stage, every retry
 svgemb convert logo.png --no-retry             # one pass, no adjusting
 svgemb convert logo.png --keep-background      # sew the paper too, at the cost of a thread
+svgemb convert logo.png --sew-background-holes # ...or only the paper the artwork closes around (B9)
 svgemb convert logo.png --remove '#c8102e'     # leave that colour to the fabric (C1)
 svgemb convert logo.png --stdout > design.svg  # for a pipe (the report goes to stderr)
 
@@ -162,7 +163,9 @@ looking at what came back, so the colour list and the sliders are the last two
 things in the column and the preview is directly above them. The other way
 round, every tweak is scroll down, look, scroll back up. **Leave the background
 unstitched** is the first control in the settings card and re-traces the moment
-you tick it, because it is the one people came for; **Absorb specks under** is
+you tick it, because it is the one people came for — with **…except where the
+artwork closes around it** under it, which is B9 and only a question while the
+background is being left bare. **Absorb specks under** is
 folded away under *Less often*, because it is the one the loop turns for you. If this machine has no tracer, the page says so and
 points you at running `svgemb serve --host 0.0.0.0` on one that does.
 
@@ -926,6 +929,48 @@ comes back as two shapes on bare cloth. A patch wants that field stitched, a
 garment print does not, and the tool cannot see which. It says so in the notes
 and offers `--keep-background` — and C1's layer panel, below, is the general
 answer: a person picking the index instead of the corner fill.
+
+**B9 — the background is not everywhere.** B8 decides *whether* a colour is the
+ground and never asks *where*, so paper the drawing closes around goes out with
+the paper around it: a white shirt drawn on white paper is paper by colour and
+design by intent. The separation colour cannot make, connectivity can — **the
+background is what the outside of the picture can reach** — so the paper label
+is flooded in from the image border and whatever is left over becomes its own
+layer, in the same colour, and gets sewn.
+
+```bash
+svgemb convert scan.png --sew-background-holes
+```
+
+```
+✅ converted at 10.0 cm: 3 ink(s), 5 shape(s), 192 node(s), 1 attempt(s)
+ℹ️  #ffffff is left unstitched (64.9% of the image), so the fabric shows through there
+threads, in the order they are sewn:
+      #ffffff   64.9%   left unstitched: the ground the corners found
+   🧵 #1a1a1a   22.0%
+   🧵 #ffffff   12.5%   the ground the artwork closes around, so it is sewn
+```
+
+Two rows in one colour, and that is the point: outside the artwork it is the
+garment, inside it is the drawing. **It costs a thread** — the paper is a colour
+in the document now, `color.max_count` counts it, and the retry loop pays for it
+out of the ink budget. That is the honest accounting rather than a side effect.
+
+**Enclosure cannot tell a shape from a gap**, which is the whole of the guard.
+Before it existed, `hatching` reported **4715 enclosed regions covering 55% of
+the image**, because on crosshatch the paper between every pair of strokes is
+walled in — sewing the spaces in the drawing rather than the drawing. So each
+region answers to the test the shop already applies to everything else, *does a
+disc the width of a stitch fit inside it*, using the profile's own minimum
+width: `hatching` drops to 5 regions and 2.3%, `photo-landscape` from 662 to 2,
+and every genuinely enclosed area survives. 13 of the 21 corpus images convert
+byte-identically with the flag on.
+
+It stays **experimental and off by default** for a reason the tool cannot
+resolve: `line-art-thick` has 16 enclosed regions covering 28% of it, and
+sewing them turns a line drawing into filled panels. That is either exactly
+right or exactly wrong depending on what the drawing is, so the run prints the
+count and the share and leaves the call to you.
 
 ### Phase C: editing the result by hand
 

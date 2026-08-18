@@ -138,6 +138,14 @@ class Settings:
     #: retry knob either — no failure the loop can see is answered by stitching
     #: the background back in, and turning it off costs a thread.
     drop_background: bool = True
+    #: B9, experimental: sew the paper the artwork closes around rather than
+    #: dropping it with the rest of the background. Not a retry knob either, and
+    #: this one has a price the others do not — the paper becomes a thread, so a
+    #: document that used it comes back with one colour more than the budget
+    #: expected and the loop lowers the ink count to pay for it. That is the
+    #: honest accounting: if the design needs white in the middle of it, white is
+    #: a thread somebody has to load.
+    sew_background_holes: bool = False
     #: C1: colours a **person** asked not to stitch, as ``#rrggbb``. The same
     #: mechanism as :attr:`drop_background` with the index picked by hand rather
     #: than by the corner fill, and not a retry knob for the third time: the loop
@@ -159,6 +167,8 @@ class Settings:
 
     def describe(self) -> str:
         said = f"{self.canvas_cm:.1f} cm, {self.colors} colour(s)"
+        if self.sew_background_holes:
+            said += ", enclosed ground sewn"
         if self.remove:
             said += f", {len(self.remove)} removed"
         return said
@@ -182,6 +192,10 @@ class LayerInfo:
     #: Why not, when it is not: "background" (B8 found the paper) or "removed"
     #: (C1, a person picked it). Empty for a layer that is being sewn.
     reason: str = ""
+    #: B9: this layer is ground the artwork closes around, being sewn in the
+    #: same colour as the ground that is not. Without the flag the panel would
+    #: show two rows in one colour, one bare and one sewn, and no reason for it.
+    enclosed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -189,6 +203,7 @@ class LayerInfo:
             "share": round(self.share, 4),
             "stitched": self.stitched,
             "reason": self.reason,
+            "enclosed": self.enclosed,
         }
 
 
@@ -262,7 +277,10 @@ def plan_removals(prepared: Preprocessed, wanted: Sequence[str]) -> List[Removal
     picks: List[Removal] = []
 
     for color in wanted:
-        index = entry_for_color(quantisation, hex_to_rgb(color))
+        # B9 can put the paper's colour in the palette twice — once as ground and
+        # once as the part of it the artwork encloses. A pick then sits exactly
+        # as far from both, and the one it can mean is the one being sewn.
+        index = entry_for_color(quantisation, hex_to_rgb(color), avoid=tuple(already))
         if index is None or index not in painted:
             picks.append(Removal(color, None, (
                 f"{color} is not a colour of this conversion — the palette was "
@@ -385,6 +403,7 @@ class Attempt:
                     share=share,
                     stitched=not reason,
                     reason=reason,
+                    enclosed=index == self.prepared.enclosed,
                 )
             )
         return out
@@ -916,6 +935,7 @@ def one_attempt(
             radius=radius,
             speck_area=settings.speck_area,
             drop_background=settings.drop_background,
+            sew_background_holes=settings.sew_background_holes,
         ),
     )
     # C1: a colour a person removed and B8's paper are one skip set from here
@@ -982,6 +1002,7 @@ def convert(
     name: str = "",
     settings: Optional[Settings] = None,
     drop_background: bool = True,
+    sew_background_holes: bool = False,
     remove: Sequence[str] = (),
 ) -> Conversion:
     """Turn an image into an SVG this profile accepts, or explain why not.
@@ -995,6 +1016,13 @@ def convert(
     every conversion did before B8. It is an escape hatch rather than a knob:
     the loop never turns it, because no failure it can see is answered by
     spending a thread on fabric.
+
+    ``sew_background_holes=True`` splits that decision in two (B9): the ground
+    outside the artwork is still left to the fabric, and the ground the artwork
+    *closes around* is sewn in its own colour. It is for the case B8's colour
+    test cannot see — a white shirt drawn on white paper is paper by colour and
+    design by intent — and it is experimental because it costs a thread, which
+    the retry loop then takes out of the ink budget.
 
     ``remove`` names colours to leave unstitched by hand (C1) — the same
     mechanism with a person choosing the index. Removing a colour does **not**
@@ -1018,6 +1046,7 @@ def convert(
     current = replace(
         settings or start,
         drop_background=drop_background,
+        sew_background_holes=sew_background_holes,
         remove=normalise_removals(remove) if remove else (settings or start).remove,
     )
     if source_side >= current.work_side:  # caller-supplied settings may not need it
@@ -1069,6 +1098,7 @@ def convert_file(
     backend: Optional[Backend] = None,
     tries: int = DEFAULT_TRIES,
     drop_background: bool = True,
+    sew_background_holes: bool = False,
     remove: Sequence[str] = (),
 ) -> Conversion:
     """:func:`convert`, from a file on disk."""
@@ -1084,6 +1114,7 @@ def convert_file(
         tries=tries,
         name=str(path),
         drop_background=drop_background,
+        sew_background_holes=sew_background_holes,
         remove=remove,
     )
 
@@ -1113,6 +1144,10 @@ def render_layers(layers: Sequence[LayerInfo]) -> List[str]:
     for layer in layers:
         mark = "🧵" if layer.stitched else "  "
         why = "" if layer.stitched else f"   {WHY_BARE.get(layer.reason, layer.reason)}"
+        # Two rows in one colour otherwise read as a bug rather than as B9's
+        # whole point: the ground outside the artwork and the ground inside it.
+        if layer.enclosed:
+            why = "   the ground the artwork closes around, so it is sewn"
         out.append(f"   {mark} {layer.color}  {layer.share:>6.1%}{why}")
     return out
 

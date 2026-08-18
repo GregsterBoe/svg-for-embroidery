@@ -286,7 +286,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em;
 .knob .val { font-weight: 600; font-variant-numeric: tabular-nums; }
 .knob input[type=range] { width: 100%; margin: 6px 0 0; accent-color: var(--accent);
                           height: 28px; touch-action: pan-y; }
-.knob .cost { color: var(--muted); font-size: .78rem; }
+.cost { color: var(--muted); font-size: .78rem; }
 .knob.fixed .val { color: var(--muted); }
 /* one row per try, and the reason it led to the next one */
 .try { display: flex; gap: 10px; align-items: baseline; width: auto; text-align: left;
@@ -813,6 +813,15 @@ function renderKnobs() {
     <div class="row">
       <input type="checkbox" id="k-bg" style="width:auto" ${s.drop_background ? 'checked' : ''}>
       <label for="k-bg">Leave the background unstitched</label>
+    </div>
+    <div id="holes" class="${s.drop_background ? '' : 'hidden'}">
+      <div class="row">
+        <input type="checkbox" id="k-holes" style="width:auto"
+               ${s.sew_background_holes ? 'checked' : ''}>
+        <label for="k-holes">…except where the artwork closes around it</label>
+      </div>
+      <div class="cost">experimental — for a white shirt drawn on white paper.
+        Costs a thread, so the ink budget drops by one.</div>
     </div>`;
   for (const knob of KNOBS.filter(k => !k.advanced)) {
     html += sliderHtml(knob, s, limits);
@@ -838,7 +847,16 @@ function renderKnobs() {
   // Ticking it is a decision, not a draft: it re-traces on the spot, the same
   // way removing a colour does. Waiting for a second tap on "Convert with these
   // settings" would make the one control people came here for the slowest.
-  $('k-bg').addEventListener('change', () => { if (!busy) runOnce(wantedSettings()); });
+  $('k-bg').addEventListener('change', () => {
+    // Sewing the enclosed part is a refinement of leaving the background bare,
+    // so it is not a question anyone can answer while the background is being
+    // sewn whole. Hidden rather than disabled: there is nothing to decide.
+    $('holes').classList.toggle('hidden', !$('k-bg').checked);
+    if (!busy) runOnce(wantedSettings());
+  });
+  // Same reasoning as the switch above it: a decision, so it re-traces on the
+  // spot rather than waiting for the apply button.
+  $('k-holes').addEventListener('change', () => { if (!busy) runOnce(wantedSettings()); });
   $('retry').addEventListener('click', () => runOnce(wantedSettings()));
   // The card is rebuilt after every attempt — including the ones the loop is
   // still working through — so it has to come back in whatever state the page
@@ -857,6 +875,7 @@ function wantedSettings(extra) {
     if (input) wanted[knob.key] = parseFloat(input.value);
   }
   if ($('k-bg')) wanted.drop_background = $('k-bg').checked;
+  if ($('k-holes')) wanted.sew_background_holes = $('k-holes').checked;
   return Object.assign(wanted, extra || {});
 }
 
@@ -874,8 +893,13 @@ function renderLayers() {
   for (const layer of a.layers) {
     const share = (layer.share * 100).toFixed(1) + '%';
     const ground = layer.reason === 'background';
+    // B9 puts the ground's colour in the list twice, and a row that repeats a
+    // swatch with no explanation reads as a bug. It is the same colour and a
+    // different decision: outside the artwork it is the garment, inside it is
+    // the drawing.
     const why = ground
       ? 'the ground the corners found — the garment shows through here'
+      : layer.enclosed ? 'the ground the artwork closes around, so it is sewn'
       : layer.reason === 'removed' ? 'you removed it' : '';
     // The background gets its control on its own row rather than only as a
     // checkbox in another card: it is the colour you are looking at, and "sew
@@ -1063,12 +1087,14 @@ async function runLoop() {
   stopped = false;
   image.attempts = [];
   image.shown = -1;
-  // Where the ruleset starts, except for the two things nothing else can decide:
-  // a colour someone removed and the background switch survive a fresh run,
+  // Where the ruleset starts, except for the things nothing else can decide: a
+  // colour someone removed and the two background switches survive a fresh run,
   // because losing them silently is worse than restarting with them.
-  let settings = (image.removed || []).length || ($('k-bg') && !$('k-bg').checked)
+  const holes = $('k-holes') ? $('k-holes').checked : false;
+  let settings = (image.removed || []).length || ($('k-bg') && !$('k-bg').checked) || holes
     ? {remove: (image.removed || []).slice(),
-       drop_background: $('k-bg') ? $('k-bg').checked : true}
+       drop_background: $('k-bg') ? $('k-bg').checked : true,
+       sew_background_holes: holes}
     : null;
   let broke = false;
   try {
@@ -1642,6 +1668,7 @@ def _settings_dict(settings: Settings) -> Dict[str, Any]:
         "speck_area": settings.speck_area,
         "work_side": settings.work_side,
         "drop_background": settings.drop_background,
+        "sew_background_holes": settings.sew_background_holes,
         "remove": list(settings.remove),
         "describe": settings.describe(),
     }
@@ -1650,7 +1677,8 @@ def _settings_dict(settings: Settings) -> Dict[str, Any]:
 def _settings_from(data: Any, current: Settings) -> Settings:
     """The knobs a slider moved, on top of the ones this attempt started with.
 
-    Two of them are not sliders: the background switch and the list of colours
+    Three of them are not sliders: the two background switches — leave it bare
+    (B8), sew the part the artwork encloses (B9) — and the list of colours
     somebody removed (C1). They travel here rather than in a request of their
     own because they are settings of an attempt like any other — carried into
     the next try by the same ``next.settings`` the loop already hands back, so
@@ -1667,6 +1695,9 @@ def _settings_from(data: Any, current: Settings) -> Settings:
         colors=int(data.get("colors", current.colors)),
         speck_area=int(data.get("speck_area", current.speck_area)),
         drop_background=bool(data.get("drop_background", current.drop_background)),
+        sew_background_holes=bool(
+            data.get("sew_background_holes", current.sew_background_holes)
+        ),
         remove=normalise_removals(wanted),
     )
 

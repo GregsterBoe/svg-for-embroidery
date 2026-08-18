@@ -2025,6 +2025,105 @@ the dropped region; re-record the baseline.
 > would still pay if it ever does: a scan whose paper keeps some grain after
 > denoising, which is the case a generated corpus does not have.
 
+### B9. The background is not everywhere · ✅ CLEARED (experimental)
+
+**Added after C1, from use**, and it is the third time this has happened — A7
+after A6, B8 after B7, this after B8. B8 decides *whether* a colour is the
+ground. It never asks **where**, and on artwork drawn on paper that is a
+different question with a different answer.
+
+`find_background` floods in from the corners to establish the paper's colour and
+then marks every pixel within tolerance of it **wherever it sits** —
+deliberately, and B3 was right to: the paper inside a drawn ring has the same
+grain as the paper outside it, and flattening only the reachable half left a
+quarter of `scan-clean` speckled. That is the right answer for *what to smooth*.
+B8 then reads the same mask to answer *what to leave to the fabric*, and there
+it is the wrong one. A white shirt drawn on white paper is paper by colour and
+design by intent, and dropping the palette entry cuts a hole through the drawing.
+
+**Decision: the background is what the outside of the picture can reach.**
+Connectivity, not colour — the one property that separates the two, and the one
+`find_background` throws away on purpose. So the paper label is flooded inward
+from the image border and what is left over is ground the artwork closed around.
+Four-connected, which is the conservative direction: a line running diagonally
+seals the pocket behind it, and sewing something that could have been bare costs
+a thread while leaving a hole where the design had ink costs the design.
+
+**The mechanism is B8's, split in two rather than extended.** The enclosed
+pixels get their own palette entry **in the same colour**, and it is an ordinary
+stitched layer from there on — the tracer works in indices, `layer_order` in
+areas, `trapped_claims` already refuses to grow anything under a skipped entry.
+Nothing downstream had to learn a new concept.
+
+**Keeping the colour is the decision the step turns on.** The cheaper repair is
+to relabel the region into whichever colour surrounds it — `despeckle`'s rule
+without its area cap, no new entry and no thread spent. It is also a *different*
+repair: it repaints the pixels in a colour they never had, so a white highlight
+inside a black outline comes back black. Where the ask is "this white belongs to
+the foreground", the answer that deletes the white is not an answer.
+
+**The price is stated rather than absorbed.** The paper is a thread now, so the
+document carries `k + 1` colours where B8's budget assumed `k`, and
+`color.max_count` counts it. Nothing special was built for that: the retry loop
+answers the complaint the way it answers every other one, by lowering the ink
+budget. B8 freed a thread because the paper was never one; B9 spends it back
+where the paper turns out to be.
+
+**The guard is most of the step, exactly as it was in B8.** Enclosure is a fact
+about connectivity and it cannot tell a shape from a gap. Measured over the
+corpus before the guard existed:
+
+| | enclosed regions | share of image |
+| --- | --- | --- |
+| `hatching` | **4715** | 55% |
+| `photo-landscape` | 662 | 4.0% |
+| `scan-clean` | 2 | 16.8% |
+| `line-art-thick` | 16 | 27.9% |
+
+Crosshatch means the paper between every pair of strokes is walled in, so the
+flag sewed the *spaces in* the drawing rather than the drawing — thousands of
+slivers, a thread spent, and the loop then trying to make them stitchable. That
+is B8's freed thread going to an antialiasing ramp, arriving again by another
+route, and it gets the same answer: **each region answers to the test the shop
+already applies to everything else** — does a disc the width of a stitch fit
+inside it — with the profile's own `stroke.min_width` as the kernel, the same
+number `_extra_entry_earned_its_thread` uses. No new threshold and nothing to
+tune: the ruleset already says how fine is too fine.
+
+| after the guard | sewn | left as fabric | share |
+| --- | --- | --- | --- |
+| `hatching` | **5** | 4710 | 55% → **2.3%** |
+| `photo-landscape` | **2** | 660 | 4.0% → **0.3%** |
+| `scan-clean` | 2 | 0 | 16.8% |
+| `line-art-thick` | 16 | 0 | 27.9% |
+
+Every real enclosed area survives and the textures stop being one. **13 of the
+21 corpus images convert byte-identically with the flag on**, which is the gate
+that matters — B9 is a new branch and the old branch may not move.
+
+**Done when** — a ring of ink on paper comes back with its middle sewn and its
+surround bare: ✅ `2 ink(s), 4 shape(s), 137 node(s)` becomes `3 ink(s), 5
+shape(s), 192 node(s)`, the run still prints `#ffffff is left unstitched`, and
+the panel lists two white rows saying which is which. ✅ Off, the same image is
+the document B8 made, label for label. ✅ A pick of `white` resolves to the row
+being sewn rather than to the fabric — the one tie two entries in one colour can
+create, broken in `entry_for_color` towards the entry a person can actually mean.
+
+**The case that is a judgement, not a bug** — the same shape as B8's full-bleed
+`logo-three-colour`. `line-art-thick` has 16 enclosed regions covering 28% of
+it, and sewing them turns a line drawing into filled panels. That may be exactly
+right (the drawing's white *is* white) or exactly wrong (the lines were the
+artwork), and the tool cannot see which. It is why this is a flag that is off
+rather than a fix that is on, and why the run prints the count and the share
+without `-v`.
+
+> **Still open.** The guard asks whether a region is *sewable*, never whether it
+> is *wanted* — those coincide on the corpus and there is no reason they must.
+> The honest next move is C1's, a person picking region by region, and it is not
+> scheduled for C1's own reason: the panel is not an editor, and a region has no
+> stable identity across a re-quantisation the way a colour does. A complaint
+> from a real design would change that; appetite should not.
+
 ---
 
 ## Phase C — Editing the result by hand
@@ -2347,7 +2446,9 @@ B2 triage ──────────┘                                     
                                     │
                                     B8 background ──┬── C1 layer panel ── C2 recolour
                                       ✅ CLEARED     │    ✅ CLEARED         ⬜ DEFERRED
-                                                    │
+                                                    │        │
+                                                    │        └── B9 enclosed ground
+                                                    │             ✅ CLEARED (experimental)
                                                     └── C3 pin a colour
                                                          ⬜ GATED ON B8's numbers
 ```
@@ -2408,6 +2509,17 @@ re-quantises; nearest-in-Lab needs a tolerance or it deletes a neighbour; and a
 run has to print the colours it found, or the flag that names one is unusable.
 The one thing C1 deliberately does not do is hand the freed thread back — that
 is B8's move, and it is right there because the paper was never a thread.
+
+**And then B9, from use again.** Running the finished pipeline on real artwork
+showed the other half of B8's assumption: it decides *whether* a colour is the
+ground and never asks *where*, so paper the drawing closes around — a white
+shirt on white paper — was being dropped with the paper around it. The fix is
+connectivity rather than colour, and its guard is B8's own lesson arriving by a
+second route: enclosure cannot tell a shape from a gap, so `hatching` offered
+4715 "enclosed regions", and the needle test that decided whether a freed thread
+was earned decides here which pockets are artwork. It is off by default and
+stays experimental, because whether a line drawing's white should be filled is a
+judgement about the design and not a fact about the file.
 
 **What is left of Phase C is C2 and C3, and neither is scheduled.** C2 is small
 and least useful; C3 is gated on a complaint from a real design, which C1 does

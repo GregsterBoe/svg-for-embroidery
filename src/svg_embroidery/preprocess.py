@@ -175,6 +175,11 @@ class Recipe:
     #: leave it unstitched. Off here and on in the conversion path, because the
     #: measuring path must keep grading the image it was handed.
     drop_background: bool = False
+    #: B9, experimental: paper the artwork has closed around is design rather
+    #: than ground, so give it its own entry and sew it instead of dropping it
+    #: with the rest. Off by default — it costs a thread, and B8's behaviour is
+    #: the one every measurement in the project was taken against.
+    sew_background_holes: bool = False
 
 
 @dataclass
@@ -192,6 +197,12 @@ class Preprocessed:
     #: which is not the same as relabelling them and is why this is an index
     #: rather than a change to :attr:`quantisation`.
     background: Optional[int] = None
+    #: B9: the entry holding paper the artwork encloses, split off :attr:`background`
+    #: and painted in the same colour, or ``None`` when the pipeline was not asked
+    #: to look or the border could reach every paper pixel. It is an ordinary
+    #: stitched layer — the field exists so the panel can say *why* a colour it is
+    #: about to list is the same one it is leaving to the fabric.
+    enclosed: Optional[int] = None
 
     def note(self, name: str, says: str) -> None:
         self.stages.append(Stage(name, says))
@@ -755,6 +766,194 @@ def despeckle(quantisation: Quantisation, min_area: int) -> Tuple[Quantisation, 
     )
 
 
+# --------------------------------- 7. paper the artwork encloses (B9)
+
+
+def enclosed_background(quantisation: Quantisation, background: int) -> List[bool]:
+    """Which pixels of the paper entry the image border cannot reach.
+
+    :func:`find_background` establishes the paper's *colour* with a fill from the
+    corners and then marks every pixel within tolerance of it **wherever it
+    sits** — deliberately, because the paper inside a drawn ring has the same
+    grain as the paper outside it and flattening only the reachable half left a
+    quarter of ``scan-clean`` speckled. That is the right answer for stage 2,
+    where the question is what to smooth.
+
+    It is the wrong answer for B8, where the question is what to *leave to the
+    fabric*: a white shirt drawn on white paper is paper by colour and artwork by
+    intent, and dropping the whole palette entry cuts a hole through the design.
+    The distinction the colour cannot make, connectivity can — **background is
+    what the outside of the picture can reach.** So this floods the paper label
+    inward from the border and returns what is left over: paper the artwork has
+    closed around.
+
+    Four-connected, which is the conservative direction here: a line of artwork
+    running diagonally seals the region behind it, so a pocket is called enclosed
+    where an eight-connected flood would leak past the corner and call it fabric.
+    Sewing something that could have been left bare is a thread; leaving a hole
+    where the design had ink is a hole.
+    """
+    width, height = quantisation.width, quantisation.height
+    indices = quantisation.indices
+    if width < 1 or height < 1 or not indices:
+        return [False] * len(indices)
+
+    reached = bytearray(len(indices))
+    stack: List[int] = []
+    border = [y * width for y in range(height)]
+    border += [y * width + width - 1 for y in range(height)]
+    border += list(range(width)) + list(range((height - 1) * width, height * width))
+    for position in border:
+        if indices[position] == background and not reached[position]:
+            reached[position] = 1
+            stack.append(position)
+
+    while stack:
+        position = stack.pop()
+        y, x = divmod(position, width)
+        for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+            if not (0 <= ny < height and 0 <= nx < width):
+                continue
+            neighbour = ny * width + nx
+            if reached[neighbour] or indices[neighbour] != background:
+                continue
+            reached[neighbour] = 1
+            stack.append(neighbour)
+
+    return [
+        value == background and not reached[position]
+        for position, value in enumerate(indices)
+    ]
+
+
+def _regions(mask: Sequence[bool], width: int, height: int) -> List[List[int]]:
+    """The mask's separate regions, four-connected, as lists of pixel positions."""
+    seen = bytearray(len(mask))
+    out: List[List[int]] = []
+    for start in range(len(mask)):
+        if seen[start] or not mask[start]:
+            continue
+        stack = [start]
+        seen[start] = 1
+        region = []
+        while stack:
+            position = stack.pop()
+            region.append(position)
+            y, x = divmod(position, width)
+            for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if not (0 <= ny < height and 0 <= nx < width):
+                    continue
+                neighbour = ny * width + nx
+                if mask[neighbour] and not seen[neighbour]:
+                    seen[neighbour] = 1
+                    stack.append(neighbour)
+        out.append(region)
+    return out
+
+
+@dataclass(frozen=True)
+class Enclosed:
+    """What B9 found, and what it did about it."""
+
+    #: The new palette entry, or ``None`` when nothing was left to sew.
+    index: Optional[int]
+    #: Share of the image that entry covers.
+    share: float
+    #: Regions the needle can sew, so they became the entry.
+    sewn: int
+    #: Regions too fine to sew, left to the fabric with the rest of the ground.
+    too_fine: int
+
+
+def sew_enclosed_background(
+    quantisation: Quantisation, background: int, radius: int = 1
+) -> Tuple[Quantisation, Enclosed]:
+    """Give the paper the artwork encloses its own palette entry, so it is sewn.
+
+    Returns the labels and what happened — an :class:`Enclosed` with ``index``
+    ``None`` when the border can reach every paper pixel, which is the ordinary
+    case and leaves the conversion exactly as B8 made it.
+
+    **Only regions the machine can sew, which is the guard the corpus asked
+    for.** Enclosure is a fact about connectivity and it does not know the
+    difference between a shape and a gap: measured over the corpus, ``hatching``
+    reports **4715 enclosed regions covering 55% of the image**, because on
+    crosshatch the paper between every pair of strokes is walled in. Sewing that
+    is not sewing the artwork, it is sewing the spaces in it — thousands of
+    slivers, a thread spent, and the loop then trying to make them stitchable.
+    ``photo-landscape`` says the same thing more quietly at 662.
+
+    So each region is put to the test the shop already applies to everything
+    else — *does a disc the width of a stitch fit inside it* — with the
+    profile's own ``stroke.min_width`` as the kernel, the same number
+    :func:`_extra_entry_earned_its_thread` uses for the same reason. A sliver
+    between two strokes vanishes under the erosion and stays fabric, exactly as
+    it was before the flag; a white shirt has an inside. No new threshold, and
+    nothing for anybody to tune: the ruleset already says how fine is too fine.
+
+    **A new entry in the same colour, rather than a relabelling into whatever
+    surrounds it.** Merging the region into its neighbour is the cheaper repair
+    and it is a different repair: it repaints the pixels in a colour they never
+    had, so a white highlight inside a black outline comes back black. Keeping
+    the colour keeps the picture, and the price is stated rather than hidden —
+    the paper is a thread now, so the document carries one more colour than B8's
+    budget assumed and ``color.max_count`` counts it. The retry loop answers that
+    complaint the way it answers every other one, by lowering the ink budget.
+
+    Two entries then hold the same RGB, which is not a problem for anything
+    downstream — the tracer works in indices, ``layer_order`` in areas, and the
+    checker counts *distinct* colours, so the document is k inks plus paper
+    rather than k inks plus paper twice. The one place it is a question is C1,
+    where a person names a colour rather than an index: see
+    :func:`entry_for_color`, which breaks the resulting tie towards the entry
+    that is actually being sewn.
+
+    No *area* threshold on top of that, deliberately. Width is the question a
+    needle asks, and B5's cleanup already drops finished subpaths under the
+    profile's minimum area — so both halves of "too small to sew" have an answer
+    in the ruleset, and neither needs a second one invented here.
+    """
+    width, height = quantisation.width, quantisation.height
+    enclosed = enclosed_background(quantisation, background)
+    if not any(enclosed):
+        return quantisation, Enclosed(None, 0.0, 0, 0)
+
+    # One erosion over the whole mask rather than one per region: a region is
+    # sewable where it still holds a pixel the disc fitted around.
+    interior = _eroded(enclosed, width, height, radius)
+    sewn: List[int] = []
+    too_fine = 0
+    for region in _regions(enclosed, width, height):
+        if any(interior[position] for position in region):
+            sewn += region
+        else:
+            too_fine += 1
+
+    if not sewn:
+        return quantisation, Enclosed(None, 0.0, 0, too_fine)
+
+    index = quantisation.colors
+    indices = list(quantisation.indices)
+    for position in sewn:
+        indices[position] = index
+    return (
+        Quantisation(
+            palette=list(quantisation.palette) + [quantisation.palette[background]],
+            indices=indices,
+            width=width,
+            height=height,
+        ),
+        Enclosed(
+            index=index,
+            share=len(sewn) / len(indices),
+            sewn=len(_regions(
+                [value == index for value in indices], width, height
+            )),
+            too_fine=too_fine,
+        ),
+    )
+
+
 # ------------------------------------------------------------- the pipeline
 
 
@@ -863,6 +1062,7 @@ def entry_for_color(
     quantisation: Quantisation,
     color: RGB,
     tolerance: float = REMOVAL_TOLERANCE,
+    avoid: Sequence[int] = (),
 ) -> Optional[int]:
     """Which palette entry a person meant when they picked this colour (C1).
 
@@ -884,21 +1084,59 @@ def entry_for_color(
     way on purpose: it matches on **pixels**, because the paper's colour has been
     through denoising and contrast since it was seed-matched, while a picked
     colour is read off the palette (or the image) that this attempt produced.
+
+    ``avoid`` breaks a **tie** towards an entry that is not in it, and does no
+    more than that: it cannot make a further colour win, so it can never delete
+    something nobody picked, which is what the tolerance above is for. It exists
+    for B9, which is the only way two entries can hold the same colour — the
+    paper, and the part of the paper the artwork encloses. Those two are exactly
+    as close to any pick, and the one a person can mean is the one being sewn:
+    naming a colour that is already fabric is a request with nothing behind it,
+    and the caller has a sentence ready for it if that is genuinely all there is.
     """
     if not quantisation.palette:
         return None
     target = srgb_to_lab("#{:02x}{:02x}{:02x}".format(*color))
-    best, best_distance = 0, None
+    avoided = set(avoid)
+    best, best_key = 0, None
     for index, entry in enumerate(quantisation.palette):
         here = srgb_to_lab("#{:02x}{:02x}{:02x}".format(*entry))
         distance = math.sqrt(
             sum((here[axis] - target[axis]) ** 2 for axis in range(3))
         )
-        if best_distance is None or distance < best_distance:
-            best, best_distance = index, distance
-    if best_distance is None or best_distance > tolerance:
+        key = (distance, index in avoided)
+        if best_key is None or key < best_key:
+            best, best_key = index, key
+    if best_key is None or best_key[0] > tolerance:
         return None
     return best
+
+
+def _eroded(mask: Sequence[bool], width: int, height: int, radius: int) -> List[bool]:
+    """What is left of a mask once a disc of ``radius`` is walked around inside it.
+
+    A5's question — *does a disc the width of a stitch fit in here* — answered on
+    the pixel grid, so it needs no geometry backend and runs on a phone. Separable:
+    a square erosion is a horizontal one then a vertical one.
+    """
+    out = list(mask)
+    if radius < 1:
+        return out
+    for along_rows in (True, False):
+        outer, inner = (height, width) if along_rows else (width, height)
+        step = 1 if along_rows else width
+        into = [False] * len(out)
+        for major in range(outer):
+            base = major * width if along_rows else major
+            for minor in range(inner):
+                if minor < radius or minor >= inner - radius:
+                    continue  # the frame cannot be an interior
+                into[base + minor * step] = all(
+                    out[base + (minor + offset) * step]
+                    for offset in range(-radius, radius + 1)
+                )
+        out = into
+    return out
 
 
 def _survives_the_needle(
@@ -906,31 +1144,16 @@ def _survives_the_needle(
 ) -> bool:
     """Is any part of this palette entry as wide as the profile's thinnest stitch?
 
-    An erosion by ``radius``, which is A5's question — *does a disc the width of
-    a stitch fit inside this shape* — asked of a colour rather than of a
-    contour, and answered on the pixel grid so it needs nothing installed.
+    :func:`_eroded` asked of a colour rather than of a contour.
     """
-    width, height = quantisation.width, quantisation.height
-    if radius < 1:
-        return True
-    mask = [value == index for value in quantisation.indices]
-
-    # Separable: a square erosion is a horizontal one then a vertical one.
-    for along_rows in (True, False):
-        outer, inner = (height, width) if along_rows else (width, height)
-        step = 1 if along_rows else width
-        out = [False] * len(mask)
-        for major in range(outer):
-            base = major * width if along_rows else major
-            for minor in range(inner):
-                if minor < radius or minor >= inner - radius:
-                    continue  # the frame cannot be an interior
-                out[base + minor * step] = all(
-                    mask[base + (minor + offset) * step]
-                    for offset in range(-radius, radius + 1)
-                )
-        mask = out
-    return any(mask)
+    return any(
+        _eroded(
+            [value == index for value in quantisation.indices],
+            quantisation.width,
+            quantisation.height,
+            radius,
+        )
+    )
 
 
 def _extra_entry_earned_its_thread(
@@ -1113,9 +1336,47 @@ def run(raster: Raster, recipe: Recipe) -> Preprocessed:
             Stage("despeckle", "off: the filter left no specks to remove")
         )
 
+    # B9, and last on purpose: despeckling relabels pixels, so a pocket of paper
+    # small enough to be absorbed is absorbed *before* anything asks whether the
+    # artwork encloses it. Asked the other way round, this would sew islands the
+    # next stage was about to delete.
+    enclosed: Optional[int] = None
+    if recipe.sew_background_holes and background is not None:
+        quantisation, found_inside = sew_enclosed_background(
+            quantisation, background, recipe.radius
+        )
+        enclosed = found_inside.index
+        skipped = (
+            f", and {found_inside.too_fine} too fine for the needle to sew, left "
+            "to the fabric"
+            if found_inside.too_fine
+            else ""
+        )
+        if enclosed is not None:
+            says = (
+                f"{found_inside.sewn} region(s) of "
+                + _hex(quantisation.palette[background])
+                + " closed in by the artwork are sewn instead"
+                f" ({_percent(found_inside.share)} of the image){skipped} — the "
+                "paper is a thread now, which the colour budget will see"
+            )
+        elif found_inside.too_fine:
+            says = (
+                f"{found_inside.too_fine} region(s) of paper are closed in by the "
+                "artwork, and every one is finer than this ruleset can sew, so the "
+                "background is left whole"
+            )
+        else:
+            says = (
+                "the border reaches all the paper, so none of it is inside the "
+                "artwork and the background is left whole"
+            )
+        stages.append(Stage("enclosed", says))
+
     return Preprocessed(
         cleaned=cleaned,
         quantisation=quantisation,
         stages=stages,
         background=background,
+        enclosed=enclosed,
     )

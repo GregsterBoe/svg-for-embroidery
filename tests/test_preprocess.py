@@ -1,5 +1,7 @@
 """B3: the preprocessing pipeline — one before/after test per stage, then the gates."""
 
+from dataclasses import replace
+
 import pytest
 
 from svg_embroidery.bench import load_corpus, run
@@ -446,6 +448,182 @@ def test_the_measuring_path_keeps_grading_the_image_it_was_handed():
     """
     assert Recipe(colors=3).drop_background is False
     assert preprocess(two_inks_on_paper(), Recipe(colors=3)).background is None
+
+
+# -- B9: paper the artwork closes around -------------------------------------
+
+def ink_ring(side=64):
+    """A drawn ring on paper: the same colour inside it and outside it.
+
+    The fixture the whole step is about. By colour, the middle is background; by
+    intent it is the white of the drawing, and only connectivity can tell them
+    apart.
+    """
+    def paint(x, y):
+        distance = ((x - side / 2) ** 2 + (y - side / 2) ** 2) ** 0.5
+        return BLACK if side / 5 < distance < side / 3 else WHITE
+
+    return image(side, side, paint)
+
+
+def test_the_paper_inside_the_ring_is_a_layer_and_the_paper_outside_is_not():
+    """B9's whole claim: background is what the outside of the picture reaches.
+
+    Same colour, same palette entry until now, and two different decisions —
+    the ring's middle is drawing that happens to be white, and dropping it with
+    the fabric cuts a hole through the design.
+    """
+    result = preprocess(
+        ink_ring(),
+        Recipe(colors=2, denoise=False, drop_background=True, sew_background_holes=True),
+    )
+
+    assert result.background is not None and result.enclosed is not None
+    palette = result.quantisation.palette
+    assert palette[result.enclosed] == palette[result.background] == WHITE[:3]
+
+    middle = result.quantisation.indices[32 * 64 + 32]
+    corner = result.quantisation.indices[0]
+    assert middle == result.enclosed, "the middle of the ring is sewn"
+    assert corner == result.background, "the paper round the outside is not"
+
+
+def test_the_stage_says_how_many_regions_it_found_and_what_they_cost():
+    result = preprocess(
+        ink_ring(),
+        Recipe(colors=2, denoise=False, drop_background=True, sew_background_holes=True),
+    )
+    said = next(stage.says for stage in result.stages if stage.name == "enclosed")
+    assert "1 region(s)" in said
+    assert "the colour budget will see" in said, "the price is stated, not hidden"
+
+
+def test_paper_the_border_can_reach_is_left_whole():
+    """A shape with nothing enclosed converts exactly as B8 made it."""
+    disc = image(64, 64, lambda x, y: BLACK if (x - 32) ** 2 + (y - 32) ** 2 < 300 else WHITE)
+    recipe = Recipe(colors=2, denoise=False, drop_background=True)
+    before = preprocess(disc, recipe)
+    after = preprocess(disc, replace(recipe, sew_background_holes=True))
+
+    assert after.enclosed is None
+    assert after.quantisation.palette == before.quantisation.palette
+    assert after.quantisation.indices == before.quantisation.indices
+    assert any("the border reaches all the paper" in s.says for s in after.stages)
+
+
+def test_it_is_off_unless_it_is_asked_for():
+    """The gate that matters: B9 is a new branch and the old branch must not move.
+
+    Every number in the benchmark was taken against B8's answer, and an image
+    with a hole in it is exactly where the two differ.
+    """
+    assert Recipe(colors=2).sew_background_holes is False
+    recipe = Recipe(colors=2, denoise=False, drop_background=True)
+    plain = preprocess(ink_ring(), recipe)
+
+    assert plain.enclosed is None
+    assert plain.quantisation.colors == 2
+    assert not any(stage.name == "enclosed" for stage in plain.stages)
+
+
+def test_a_gap_too_fine_to_sew_stays_fabric_and_the_room_beside_it_does_not():
+    """The guard the corpus asked for, in one fixture.
+
+    Enclosure is a fact about connectivity and it cannot tell a shape from a
+    gap: measured over the corpus, ``hatching`` reports **4715 enclosed regions
+    covering 55% of the image**, because the paper between every pair of strokes
+    is walled in. With the needle test each region answers for itself — 5 sewn,
+    4710 left as fabric, and the share falls to 2.3%. Here the slit is one pixel
+    wide and the room is ten, at a kernel that asks for five.
+    """
+    def paint(x, y):
+        if not (10 <= x < 54 and 10 <= y < 54):
+            return WHITE
+        if y == 15 and 15 <= x < 45:
+            return WHITE  # a hairline gap: enclosed, and nothing can sew it
+        if 20 <= x < 30 and 30 <= y < 40:
+            return WHITE  # a room: enclosed, and plainly sewable
+        return BLACK
+
+    result = preprocess(
+        image(64, 64, paint),
+        Recipe(
+            colors=2,
+            radius=2,
+            denoise=False,
+            drop_background=True,
+            sew_background_holes=True,
+        ),
+    )
+
+    assert result.enclosed is not None
+    indices = result.quantisation.indices
+    assert indices[35 * 64 + 25] == result.enclosed, "the room is sewn"
+    assert indices[15 * 64 + 30] == result.background, "the hairline is not"
+
+    said = next(stage.says for stage in result.stages if stage.name == "enclosed")
+    assert "1 region(s)" in said
+    assert "1 too fine for the needle" in said, "what was left out is said, not hidden"
+
+
+def test_an_image_where_nothing_enclosed_is_sewable_is_left_exactly_as_b8_made_it():
+    """``hatching`` in miniature: every pocket is a gap, so none of them is a layer."""
+    def paint(x, y):
+        if not (10 <= x < 54 and 10 <= y < 54):
+            return WHITE
+        # Stripes walled in at both ends, so each one really is enclosed.
+        return WHITE if y % 2 and 14 <= x < 50 else BLACK
+
+    striped = image(64, 64, paint)
+    recipe = Recipe(colors=2, radius=2, denoise=False, drop_background=True)
+    before = preprocess(striped, recipe)
+    after = preprocess(striped, replace(recipe, sew_background_holes=True))
+
+    assert after.enclosed is None
+    assert after.quantisation.indices == before.quantisation.indices
+    said = next(stage.says for stage in after.stages if stage.name == "enclosed")
+    assert "finer than this ruleset can sew" in said
+
+
+def test_a_speck_of_paper_is_absorbed_before_anything_asks_if_it_is_enclosed():
+    """Order: despeckle runs first, or B9 sews islands stage 6 was about to delete."""
+    def paint(x, y):
+        if 20 <= x < 44 and 20 <= y < 44:
+            return WHITE if (x, y) == (32, 32) else BLACK
+        return WHITE
+
+    result = preprocess(
+        image(64, 64, paint),
+        Recipe(
+            colors=2,
+            denoise=False,
+            drop_background=True,
+            sew_background_holes=True,
+            speck_area=4,
+        ),
+    )
+    assert result.enclosed is None, "the one-pixel pocket went to the despeckler"
+
+
+def test_a_pick_lands_on_the_colour_being_sewn_when_two_entries_share_one():
+    """The tie B9 creates, and the only place it is a question.
+
+    C1 resolves a pick by nearest-in-Lab, and B9 can put the paper's colour in
+    the palette twice. The two are exactly as close, so distance cannot choose;
+    the one a person can mean is the one that is actually in the document.
+    """
+    twice = Quantisation(
+        palette=[(255, 255, 255), (26, 26, 26), (255, 255, 255)],
+        indices=[0, 1, 2, 0],
+        width=2,
+        height=2,
+    )
+    assert entry_for_color(twice, (255, 255, 255)) == 0
+    assert entry_for_color(twice, (255, 255, 255), avoid=(0,)) == 2
+    # It breaks a tie and nothing more: a colour out of range is still out of
+    # range, so avoiding an entry can never promote a different colour.
+    assert entry_for_color(twice, (255, 255, 255), avoid=(0, 2)) == 0
+    assert entry_for_color(twice, (200, 16, 46), avoid=(1,)) is None
 
 
 # -- the pipeline ------------------------------------------------------------

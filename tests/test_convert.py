@@ -542,6 +542,95 @@ def test_the_run_says_what_it_left_to_the_fabric_without_being_asked(tmp_path, c
     assert "left unstitched" not in kept
 
 
+# -- B9: the ground the artwork closes around ------------------------------
+
+def ink_ring(side=128):
+    """A thick ring of ink on paper — white outside it, white inside it.
+
+    The case B8's colour test cannot see. The middle is paper by colour and
+    drawing by intent, and dropping the palette entry cuts a hole through it.
+    """
+    def paint(x, y):
+        distance = ((x - side / 2) ** 2 + (y - side / 2) ** 2) ** 0.5
+        return BLACK if side / 5 < distance < side / 3 else WHITE
+
+    return image(side, side, paint)
+
+
+@needs_tracer
+def test_the_middle_of_the_ring_is_sewn_and_the_paper_round_it_is_not():
+    """One colour, two decisions — which is the whole of B9.
+
+    The document gains a white layer it did not have, *and* keeps the note
+    saying the background is being left to the fabric: the ground outside the
+    artwork is still bare. Anything less than both would be one of the two
+    answers B8 already had.
+    """
+    result = convert(ink_ring(), BASIC, name="ring", sew_background_holes=True)
+    colors = {color.lower() for color in parse_svg(result.svg).colors()}
+
+    assert result.best.prepared.enclosed is not None
+    assert "#ffffff" in colors, "the paper the ring encloses is a thread now"
+    assert any("left unstitched" in note for note in result.best.trace_notes)
+
+    # ...and the panel says which of the two white rows is which.
+    layers = result.best.layers
+    assert [layer.color for layer in layers if layer.enclosed] == ["#ffffff"]
+    assert [layer.color for layer in layers if layer.reason == "background"] == ["#ffffff"]
+
+
+@needs_tracer
+def test_without_the_flag_the_hole_stays_a_hole():
+    """The gate: B9 is a new branch, and B8's branch may not move."""
+    plain = convert(ink_ring(), BASIC, name="ring")
+
+    assert plain.best.prepared.enclosed is None
+    assert "#ffffff" not in {c.lower() for c in parse_svg(plain.svg).colors()}
+    assert not any(layer.enclosed for layer in plain.best.layers)
+
+
+@needs_tracer
+def test_sewing_the_enclosed_ground_costs_a_thread(tmp_path, capsys):
+    """The price, said out loud rather than discovered on the machine.
+
+    A conversion that sews the middle of the ring loads white as well as the
+    ink, so it reports one thread more than the same image without the flag.
+    The flag's help says so, the stage note says so, and the ink count is
+    where it lands.
+    """
+    source = tmp_path / "ring.png"
+    source.write_bytes(encode_png(ink_ring()))
+
+    assert main(["convert", str(source)]) == 0
+    assert "2 ink(s)" in capsys.readouterr().out
+
+    assert main(["convert", str(source), "--sew-background-holes", "-o",
+                 str(tmp_path / "ring.svg")]) == 0
+    out = capsys.readouterr().out
+    assert "3 ink(s)" in out
+    assert "the ground the artwork closes around" in out
+    assert "#ffffff is left unstitched" in out, "the outside is still fabric"
+
+
+@needs_tracer
+def test_the_colour_a_person_picks_is_the_one_being_sewn():
+    """C1 through B9's tie: a pick names the white in the design, not the fabric.
+
+    Both entries are the same colour, so nearest-in-Lab cannot choose between
+    them. Removing #ffffff has to mean *stop sewing the middle of the ring* —
+    the other one is already bare, and a button that reports "nothing to do"
+    when there plainly is something is worse than no button.
+    """
+    result = convert(
+        ink_ring(), BASIC, name="ring", sew_background_holes=True, remove=["white"]
+    )
+    pick = result.best.picks[0]
+
+    assert pick.applied, pick.says
+    assert pick.index == result.best.prepared.enclosed
+    assert "#ffffff" not in {c.lower() for c in parse_svg(result.svg).colors()}
+
+
 # -- C1: a person picking the colour that goes -----------------------------
 
 def two_inks_on_paper(side=128):

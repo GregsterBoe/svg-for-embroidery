@@ -8,6 +8,8 @@ image — one whose detail is too fine at the smallest size the profile allows
 and stitchable at a size it also allows.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from svg_embroidery.checker import Checker
@@ -34,7 +36,7 @@ from svg_embroidery.convert import (
 from svg_embroidery.profiles import load_profile
 from svg_embroidery.raster import encode_png
 from svg_embroidery.tracer import DISABLE_ENV_VAR, available_backends
-from svg_embroidery.visual import Raster
+from svg_embroidery.visual import Raster, available_renderers as renderers, render
 
 BASIC = load_profile("embroidery-basic")
 STRICT = load_profile("embroidery-strict")
@@ -538,3 +540,256 @@ def test_the_run_says_what_it_left_to_the_fabric_without_being_asked(tmp_path, c
     kept = capsys.readouterr().out
     assert "2 ink(s)" in kept
     assert "left unstitched" not in kept
+
+
+# -- C1: a person picking the colour that goes -----------------------------
+
+def two_inks_on_paper(side=128):
+    """Two flat inks on white, at a budget of three — so the +1 is not earned.
+
+    B8 measured this case on the corpus: handed a spare entry, flat artwork
+    spends it on the antialiasing ramp between two colours rather than on a
+    colour, so the entry is given back and the image is quantised at the plain
+    budget. That makes this the one fixture where the automatic route and the
+    hand-picked one see the same palette, which is what lets them be compared
+    byte for byte.
+    """
+    def paint(x, y):
+        if 20 <= x < 60:
+            return BLACK
+        if 70 <= x < 110:
+            return (200, 16, 46, 255)
+        return WHITE
+
+    return image(side, side, paint)
+
+
+def three_bands(side=128):
+    """Blue field, red band, white band — and the red is in the middle.
+
+    Built so removing the red proves something: the blue underneath it is
+    stitched *first*, so B4's trap has been growing blue a pixel into the red
+    all along. A design where the removed colour is the bottom layer would pass
+    the same test with the exclusion taken out. It also spans enough of the
+    tonal range that B3 leaves the contrast alone, so the colours that come out
+    are the colours that went in and the test can name them.
+
+    It is **full-bleed**, so the corner fill calls the blue field a background
+    and B8 drops it unless told otherwise — the case the roadmap names with
+    ``logo-three-colour``, where whether the field is stitched depends on
+    something the tool cannot see. The tests below convert it with
+    ``drop_background=False``, which is a person saying *this is a patch, sew
+    the field*, and is also what leaves a stitched layer under the red.
+    """
+    def paint(x, y):
+        if 30 <= y < 70:
+            return (200, 16, 46, 255)
+        if 90 <= y < 110:
+            return WHITE
+        return (32, 74, 160, 255)
+
+    return image(side, side, paint)
+
+
+@needs_tracer
+def test_a_colour_someone_removed_is_left_to_the_fabric():
+    """C1's mechanism: the same skip B8 built, with the index picked by hand."""
+    result = convert(
+        three_bands(), BASIC, name="bands",
+        drop_background=False, remove=["#c8102e"],
+    )
+    colors = {color.lower() for color in parse_svg(result.svg).colors()}
+
+    assert "#c8102e" not in colors
+    assert colors == {"#204aa0", "#ffffff"}
+    assert [(layer.color, layer.reason) for layer in result.best.layers] == [
+        ("#204aa0", ""), ("#c8102e", "removed"), ("#ffffff", "")
+    ]
+    assert any("#c8102e is left unstitched" in note for note in result.best.trace_notes)
+
+
+@needs_tracer
+def test_the_removed_colour_takes_its_thread_with_it_rather_than_freeing_one():
+    """B8 hands the paper's thread back to the artwork; C1 deliberately does not.
+
+    The paper was never a thread, so counting it as one was the defect B8 fixed.
+    A colour a person removes *is* a thread they chose not to spend, and handing
+    it back would re-quantise everything — so the panel's list would rearrange
+    itself under the finger that tapped it. Removing removes; the colour slider
+    is right next to it for spending the budget elsewhere.
+    """
+    plain = convert(three_bands(), BASIC, name="bands", drop_background=False)
+    cut = convert(
+        three_bands(), BASIC, name="bands",
+        drop_background=False, remove=["#c8102e"],
+    )
+
+    assert cut.settings.colors == plain.settings.colors == 3
+    # Every layer that is left is the layer it was, drawn the same way: the only
+    # difference between the two documents is the one that was taken out.
+    assert [layer.color for layer in cut.best.layers] == [
+        layer.color for layer in plain.best.layers
+    ]
+
+
+@needs_tracer
+def test_the_background_and_a_hand_picked_colour_go_down_one_path():
+    """C1's gate, and the reason it is a small step rather than a feature.
+
+    B8 finds the paper with a corner fill and leaves that entry out; C1 lets a
+    person name the entry instead. Asked for the same colour both ways, the two
+    produce **the same document, byte for byte** — there is one exclusion in the
+    pipeline, not one for the tool and one for the user.
+
+    Two inks rather than three, because B8's *other* half must not be in the
+    comparison: with three inks on paper the +1 is earned and the automatic
+    route quantises at four entries where the hand route quantises at three, so
+    the two documents differ for a reason that has nothing to do with the
+    exclusion. Here the extra entry merges back into its neighbour and both
+    routes see one palette — which the test asserts before comparing bytes.
+    """
+    source = two_inks_on_paper()
+    auto = convert(source, BASIC, name="two-inks")
+    hand = convert(
+        source, BASIC, name="two-inks", drop_background=False, remove=["white"]
+    )
+
+    paper = [layer for layer in auto.best.layers if layer.reason == "background"]
+    assert [layer.color for layer in paper] == ["#ffffff"]
+    # The fixture only says anything while both routes see the same palette;
+    # B8's +1 is its own decision and is not what is being compared here.
+    assert [layer.color for layer in hand.best.layers] == [
+        layer.color for layer in auto.best.layers
+    ]
+    assert hand.svg == auto.svg
+    assert hand.best.layers[0].reason == "removed"
+
+
+@needs_tracer
+@pytest.mark.skipif(not renderers(), reason="no renderer installed here")
+def test_removing_a_colour_leaves_no_fringe_of_the_layer_beneath():
+    """The other half of C1's gate, measured rather than reasoned about.
+
+    Cutting the ``<g>`` out of the finished document would be one line and would
+    leave exactly this: every layer stitched earlier was grown a pixel underneath
+    this one by B4's trap, and taking the cover away exposes that growth as a
+    hairline of the wrong colour round the hole. Re-tracing with the entry
+    excluded produces the document that colour was never in.
+
+    The counterfactual — what the same fixture looks like *without* the
+    exclusion — is measured at the mechanism in ``test_tracer``: 0 painted
+    pixels with it, 70 without, against a rim of 136.
+    """
+    result = convert(
+        three_bands(), BASIC, name="bands",
+        drop_background=False, remove=["#c8102e"],
+    )
+    quantisation = result.best.prepared.quantisation
+    index = result.best.removed[0]
+
+    # The layer beneath is stitched and larger, so the trap did have something
+    # to grow. Without that, this test would pass with the exclusion removed.
+    beneath = result.best.layers[0]
+    assert beneath.stitched and beneath.share > quantisation.area(index)
+
+    shot = render(result.svg, width=quantisation.width)
+    assert shot is not None
+    painted = 0
+    hole = 0
+    for y in range(shot.height):
+        row = (y * quantisation.height // shot.height) * quantisation.width
+        for x in range(shot.width):
+            if quantisation.indices[row + x * quantisation.width // shot.width] != index:
+                continue
+            hole += 1
+            if shot.pixels[(y * shot.width + x) * 4 + 3] >= 128:
+                painted += 1
+    assert hole > 1000, "the hole has to be big enough to see a hairline in"
+    assert painted == 0, f"{painted} of {hole} pixels where the colour was are painted"
+
+
+@needs_tracer
+def test_a_pick_that_names_nothing_here_removes_nothing_and_says_which():
+    """A removal is resolved per attempt, and a retry re-quantises underneath it.
+
+    Removing *something* because it was the nearest thing left is the one way
+    this mechanism could delete a colour nobody picked, so the tolerance is a
+    colour anyone would call the same one and anything further off is reported.
+    """
+    result = convert(
+        three_bands(), BASIC, name="bands",
+        drop_background=False, remove=["#00ff00"],
+    )
+
+    assert not result.best.removed
+    assert len(parse_svg(result.svg).colors()) == 3
+    assert any("is not a colour of this conversion" in n for n in result.best.remove_notes)
+    assert [pick.applied for pick in result.best.picks] == [False]
+
+
+@needs_tracer
+def test_the_last_colour_cannot_be_removed():
+    """A document with no thread in it is not a conversion."""
+    result = convert(
+        three_bands(), BASIC, name="bands",
+        drop_background=False, remove=["#204aa0", "#ffffff", "#c8102e"],
+    )
+
+    assert len(result.best.removed) == 2
+    assert any("would leave nothing to stitch" in n for n in result.best.remove_notes)
+    assert len(parse_svg(result.svg).colors()) == 1
+
+
+@needs_tracer
+def test_removing_the_colour_the_corners_already_found_says_so():
+    """Otherwise the button looks broken: the picture does not change."""
+    result = convert(three_inks_on_paper(), BASIC, name="three-inks", remove=["#ffffff"])
+
+    assert not result.best.removed  # it was already out
+    assert any("already being left to the fabric" in n for n in result.best.remove_notes)
+
+
+@needs_tracer
+def test_a_removal_is_carried_into_the_retry_rather_than_undone_by_it():
+    """The loop turns knobs; it does not put back a colour someone took out."""
+    settings = replace(
+        initial_settings(STRICT, source_side=256)[0], remove=("#c8102e",)
+    )
+    proposed, _ = adjust(settings, ["geometry.min_feature_size"], STRICT)
+    assert proposed.remove == ("#c8102e",)
+    assert proposed.canvas_mm > settings.canvas_mm
+
+
+def test_a_colour_that_is_not_a_colour_is_a_usage_error(tmp_path, capsys):
+    """Found before the tracing rather than after a minute of it."""
+    source = tmp_path / "bands.png"
+    source.write_bytes(encode_png(three_bands()))
+
+    assert main(["convert", str(source), "--remove", "burgundy-ish"]) == 2
+    assert "not a colour" in capsys.readouterr().err
+
+
+@needs_tracer
+def test_the_command_prints_the_colours_that_remove_names(tmp_path, capsys):
+    """A flag you cannot use without guessing is a flag nobody can use.
+
+    ``--remove`` names colours out of the palette this image produced, so the
+    run prints that palette — without ``-v``, since a list you have to turn on
+    is not there when you need it.
+    """
+    source = tmp_path / "bands.png"
+    source.write_bytes(encode_png(three_bands()))
+
+    assert main(["convert", str(source), "-p", "embroidery-basic",
+                 "--keep-background"]) == 0
+    listed = capsys.readouterr().out
+    assert "threads, in the order they are sewn:" in listed
+    assert "#c8102e" in listed
+
+    out = tmp_path / "cut.svg"
+    assert main([
+        "convert", str(source), "-p", "embroidery-basic", "--keep-background",
+        "--remove", "#c8102e", "-o", str(out),
+    ]) == 0
+    assert "you removed it" in capsys.readouterr().out
+    assert "#c8102e" not in out.read_text(encoding="utf-8").lower()

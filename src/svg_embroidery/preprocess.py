@@ -125,6 +125,16 @@ BACKGROUND_PURITY = 0.60
 #: catches entries nobody could tell apart. See :func:`quantise_lab`.
 MIN_SEPARATION = 2.5
 
+#: How far a colour somebody picked may sit from the palette entry it names, in
+#: CIE Lab (C1). A colour tapped in the layer panel *is* an entry of the palette
+#: it was read off, so it matches at zero — this number is for the other case,
+#: where a pick made against one attempt is replayed against the next one and
+#: the quantiser has moved its entries in between. Ten is far enough to survive
+#: that drift (a just-noticeable difference is 1–2) and near enough that a pick
+#: cannot land on a different colour of the artwork, which is the only way this
+#: mechanism could delete something nobody chose. See :func:`entry_for_color`.
+REMOVAL_TOLERANCE = 10.0
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -847,6 +857,48 @@ def background_entry(
     if hits < quantisation.indices.count(index) * BACKGROUND_PURITY:
         return None
     return index
+
+
+def entry_for_color(
+    quantisation: Quantisation,
+    color: RGB,
+    tolerance: float = REMOVAL_TOLERANCE,
+) -> Optional[int]:
+    """Which palette entry a person meant when they picked this colour (C1).
+
+    The nearest one in CIE Lab, which is the quantiser's own answer: every pixel
+    of the image was assigned to an entry by exactly this question, so a colour
+    picked out of the source resolves to the layer that colour was traced into.
+    Nearest in *Lab* rather than in RGB for the reason A4 wrote down — RGB
+    distance does not match what a person sees, and this is a person pointing.
+
+    ``None`` when the nearest entry is further off than ``tolerance``, which is
+    the guard that makes the mechanism safe to replay: a removal named against
+    one attempt is re-resolved against the next, and a retry that re-quantised
+    the image may not have that colour any more. Removing *something* because it
+    was the closest thing left would delete a colour nobody picked, so nothing is
+    removed and the caller says so — the project's own rule that a question you
+    can't answer costs the answer and never the run.
+
+    :func:`background_entry` asks a related question and answers it a different
+    way on purpose: it matches on **pixels**, because the paper's colour has been
+    through denoising and contrast since it was seed-matched, while a picked
+    colour is read off the palette (or the image) that this attempt produced.
+    """
+    if not quantisation.palette:
+        return None
+    target = srgb_to_lab("#{:02x}{:02x}{:02x}".format(*color))
+    best, best_distance = 0, None
+    for index, entry in enumerate(quantisation.palette):
+        here = srgb_to_lab("#{:02x}{:02x}{:02x}".format(*entry))
+        distance = math.sqrt(
+            sum((here[axis] - target[axis]) ** 2 for axis in range(3))
+        )
+        if best_distance is None or distance < best_distance:
+            best, best_distance = index, distance
+    if best_distance is None or best_distance > tolerance:
+        return None
+    return best
 
 
 def _survives_the_needle(

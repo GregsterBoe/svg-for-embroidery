@@ -362,6 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
         "costs one of the profile's threads",
     )
     convert.add_argument(
+        "--remove",
+        action="append",
+        default=[],
+        metavar="COLOUR",
+        help="leave this colour unstitched, so the fabric shows through where it "
+        "was; repeatable. The run prints the colours it found, which is where "
+        "these are named from",
+    )
+    convert.add_argument(
         "-v", "--verbose", action="store_true", help="show what every stage did"
     )
     convert.add_argument("--json", action="store_true", help="machine readable output")
@@ -1052,7 +1061,13 @@ def _cmd_assess(args: argparse.Namespace) -> int:
 
 
 def _cmd_convert(args: argparse.Namespace) -> int:
-    from .convert import ConvertError, convert_file, render_conversion, render_json
+    from .convert import (
+        ConvertError,
+        convert_file,
+        normalise_removals,
+        render_conversion,
+        render_json,
+    )
 
     try:
         profile = load_profile(args.profile)
@@ -1063,6 +1078,13 @@ def _cmd_convert(args: argparse.Namespace) -> int:
 
     if args.json and args.stdout:
         print("error: --json and --stdout both claim stdout; pick one", file=sys.stderr)
+        return 2
+    # A colour nobody can read is a usage error, and finding that out after a
+    # minute of tracing would be finding it out too late.
+    try:
+        remove = normalise_removals(args.remove)
+    except ValueError as exc:
+        print(f"error: --remove {exc}", file=sys.stderr)
         return 2
     tries = 1 if args.no_retry else (args.tries if args.tries is not None else None)
     if tries is not None and tries < 1:
@@ -1113,6 +1135,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
                 profile,
                 backend=backend,
                 drop_background=not args.keep_background,
+                remove=remove,
                 **({} if tries is None else {"tries": tries}),
             )
             for path in files

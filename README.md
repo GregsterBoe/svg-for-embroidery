@@ -67,6 +67,8 @@ svgemb convert logo.png                        # what it would produce; writes n
 svgemb convert logo.png -p embroidery-strict   # aimed at a particular shop
 svgemb convert logo.png -v                     # every stage, every retry
 svgemb convert logo.png --no-retry             # one pass, no adjusting
+svgemb convert logo.png --keep-background      # sew the paper too, at the cost of a thread
+svgemb convert logo.png --remove '#c8102e'     # leave that colour to the fabric (C1)
 svgemb convert logo.png --stdout > design.svg  # for a pipe (the report goes to stderr)
 
 svgemb profiles                                # list all rulesets
@@ -143,9 +145,25 @@ with the reason it moved on ("stitched larger: 8.0 → 12.0 cm; the artwork is
 unchanged, only the size it is sewn at"), any two of them can be compared side
 by side, and the settings the loop turns are sliders you can turn yourself —
 size, colours, how much speckle to absorb, each labelled with what it costs.
-Values outside what the ruleset allows are pulled back, and it says so. Then
-download the SVG, or hand it to the checker with **Check and fix this SVG**
-without leaving the page. If this machine has no tracer, the page says so and
+Values outside what the ruleset allows are pulled back, and it says so.
+
+Every conversion also comes with its **colours**: a swatch each, the share of
+the design it covers, and a button — **Remove**, **Put back**, or **Sew it** on
+the row that is the background. Removing one traces the image again without it —
+not deleting a group, which would leave a hairline of the layer underneath — so
+what you get is the document that colour was never in, previewed on chequered
+fabric so the hole is visible. There is an eyedropper if the colour is easier to
+point at in the picture than to pick from the list. Then download the SVG, or
+hand it to the checker with **Check and fix this SVG** without leaving the page.
+
+**On a phone the controls sit under the result, not above it.** Converting is
+one tap near the top; everything you do afterwards is a change made while
+looking at what came back, so the colour list and the sliders are the last two
+things in the column and the preview is directly above them. The other way
+round, every tweak is scroll down, look, scroll back up. **Leave the background
+unstitched** is the first control in the settings card and re-traces the moment
+you tick it, because it is the one people came for; **Absorb specks under** is
+folded away under *Less often*, because it is the one the loop turns for you. If this machine has no tracer, the page says so and
 points you at running `svgemb serve --host 0.0.0.0` on one that does.
 
 Pull down Termux's notification and tap **Acquire wakelock** if Android keeps
@@ -270,9 +288,10 @@ is measured at its real size.
 
 ## Where this is going
 
-[`docs/ROADMAP.md`](docs/ROADMAP.md) plans two phases: opt-in automatic fixing
+[`docs/ROADMAP.md`](docs/ROADMAP.md) plans three phases: opt-in automatic fixing
 of the errors reported here, then converting raster images into embroidery-ready
-SVGs. Both are split into steps with explicit validation gates.
+SVGs, and then editing the result by hand — which so far means removing a colour
+from it. All are split into steps with explicit validation gates.
 
 **Phase A is complete** — `svgemb fix` is the whole of it, seen from outside.
 The steps behind it:
@@ -905,8 +924,84 @@ colour that left.
 its field dropped too — `logo-three-colour` is deliberately full-bleed blue and
 comes back as two shapes on bare cloth. A patch wants that field stitched, a
 garment print does not, and the tool cannot see which. It says so in the notes
-and offers `--keep-background`; Phase C's layer panel is where a person picks
-the index instead of the corner fill.
+and offers `--keep-background` — and C1's layer panel, below, is the general
+answer: a person picking the index instead of the corner fill.
+
+### Phase C: editing the result by hand
+
+Phase A repairs a document because a *rule* complained; Phase B produces one
+from an image. Phase C is the first time the tool changes a document because
+**the person looking at it said so**.
+
+**Not an editor, a layer panel.** A converted document is unusually simple by
+construction — one `<g fill="…">` per colour with a single `<path>` inside — so
+every edit anyone wants after a conversion is an operation on *that list* and
+needs no geometry at all. A node editor is a different project (selection,
+transforms, undo, save-back), Inkscape is better at it, and A0 already proved
+the round trip through it. So: **svgemb decides what can be stitched, Inkscape
+changes what is drawn.**
+
+**C1 — remove a colour.** B8's mechanism with a human picking the index:
+
+```bash
+svgemb convert scan.png                        # prints the colours it found
+svgemb convert scan.png --remove '#c8102e' -o design.svg
+```
+
+```
+threads, in the order they are sewn:
+      #ffffff   31.0%   left unstitched: the ground the corners found
+      #c8102e   23.5%   left unstitched: you removed it
+   🧵 #1a1a1a   23.5%
+   🧵 #204aa0   22.0%
+```
+
+The list prints without `-v`, because it is what `--remove` names its colours
+from and a flag you cannot use without guessing is a flag nobody can use. In the
+browser it is a panel: a swatch per colour with its share, one button each, and
+an eyedropper that reads a pixel out of the upload the page is already holding.
+
+**The background is a colour in that list before it is a setting in a card.**
+B8's `--keep-background` is a checkbox now — first control in the settings, and
+it re-traces the moment you tick it — but the direction people actually arrive
+from is *seeing* the hole and wanting it filled, so the ground's own row carries
+a **Sew it** button. The checkbox is still the setting it flips, because with
+the background sewn there is no ground row left to put a button on.
+
+**Removal re-traces; it does not delete the `<g>`.** Cutting the group out of
+the finished document is one line and leaves a hairline: every layer stitched
+earlier was grown a pixel underneath this one by B4's trap, and taking the cover
+away exposes that growth as a fringe of the wrong colour around the hole.
+Re-tracing with the entry excluded produces the document that colour was never
+in — measured on a three-band fixture, **0 painted pixels** where the colour
+used to be — and the checker's verdict is about the file you will download.
+
+**One exclusion, not two.** The automatic background drop and a hand-picked
+removal are the same skip set, handed to the same trace, so the rule that stops
+a fringe forming cannot be applied to one and forgotten for the other. Asked for
+the same colour both ways, they produce the same document *byte for byte*, and
+the browser produces the same bytes as `--remove` — both asserted by tests
+rather than by inspection.
+
+**Picks are colours, not indices**, because every knob on the page re-quantises
+the image and an index only means something in the palette it came from. Each is
+resolved per attempt to the nearest entry in CIE Lab — the quantiser's own
+question, asked of a colour instead of a pixel — and a pick that lands further
+off than a colour anyone would call the same one removes **nothing** and says
+so, rather than deleting its neighbour. Three guards, and each ends in a
+sentence: the colour is not in this palette, it was already the background, or
+it is the last thing left and a document with no thread in it is not a
+conversion.
+
+**Removing does not hand the thread back.** B8's paper was never a thread, which
+is why its budget is `k + 1`; a colour you remove *is* a thread you chose not to
+spend, and re-quantising to redistribute it would rearrange every other layer
+under the finger that tapped one. The colour slider is right there for spending
+the budget elsewhere.
+
+C2 (recolour a layer) and C3 (pin a colour) are not built —
+[docs/ROADMAP.md](docs/ROADMAP.md#phase-c--editing-the-result-by-hand) has both,
+including why C3's gate is a measurement someone takes *before* starting.
 
 ### Optional capabilities
 

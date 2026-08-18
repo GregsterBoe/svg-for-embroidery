@@ -60,16 +60,24 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import cleanup as b5
 from .bench import MAX_WORK_SIDE, canvas_and_stroke, color_budget, scale_for
+from .colors import hex_to_rgb, normalize_color
 from .document import parse_svg
 from .findings import Finding, Report
-from .preprocess import Preprocessed, Recipe
+from .preprocess import Preprocessed, Recipe, entry_for_color
 from .preprocess import run as preprocess_run
 from .preprocess import upscale
 from .profiles import Profile
 from .raster import Raster, RasterError, downsample, load_image
 from .tracer import DEFAULT_OVERLAP
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
-from .tracer import Backend, TracerError, default_backend, measure_svg
+from .tracer import (
+    Backend,
+    TracerError,
+    default_backend,
+    hex_color,
+    layer_order,
+    measure_svg,
+)
 
 #: How many times the loop may trace one image. Four is two more than the
 #: corpus ever needs and few enough that a phone is not left grinding: the
@@ -130,6 +138,16 @@ class Settings:
     #: retry knob either — no failure the loop can see is answered by stitching
     #: the background back in, and turning it off costs a thread.
     drop_background: bool = True
+    #: C1: colours a **person** asked not to stitch, as ``#rrggbb``. The same
+    #: mechanism as :attr:`drop_background` with the index picked by hand rather
+    #: than by the corner fill, and not a retry knob for the third time: the loop
+    #: has no business deleting a colour nobody complained about.
+    #:
+    #: Carried as colours rather than as palette indices because an index is
+    #: only meaningful in the quantisation it came from, and every knob above
+    #: re-quantises. :func:`plan_removals` resolves them per attempt and reports
+    #: any it could not.
+    remove: Tuple[str, ...] = ()
 
     @property
     def canvas_cm(self) -> float:
@@ -140,7 +158,151 @@ class Settings:
         return self.canvas_mm / max(1, self.work_side)
 
     def describe(self) -> str:
-        return f"{self.canvas_cm:.1f} cm, {self.colors} colour(s)"
+        said = f"{self.canvas_cm:.1f} cm, {self.colors} colour(s)"
+        if self.remove:
+            said += f", {len(self.remove)} removed"
+        return said
+
+
+@dataclass(frozen=True)
+class LayerInfo:
+    """One palette entry of a conversion, and whether it is being sewn.
+
+    What the layer panel lists (C1) and what ``svgemb convert`` prints as the
+    thread list — one computation behind both, so a colour you can see in the
+    terminal is a colour you can name to ``--remove`` and a colour you can tap.
+    """
+
+    #: ``#rrggbb``, which is also the fill the document paints it with.
+    color: str
+    #: Share of the working image this entry covers — its own pixels, before
+    #: B4's trap grew it under the layers stitched after it.
+    share: float
+    stitched: bool = True
+    #: Why not, when it is not: "background" (B8 found the paper) or "removed"
+    #: (C1, a person picked it). Empty for a layer that is being sewn.
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "color": self.color,
+            "share": round(self.share, 4),
+            "stitched": self.stitched,
+            "reason": self.reason,
+        }
+
+
+def normalise_removals(values: Sequence[str]) -> Tuple[str, ...]:
+    """Colour names, ``#rgb`` and ``#rrggbb`` down to one spelling, in order.
+
+    Through the checker's own :func:`~svg_embroidery.colors.normalize_color`, so
+    ``white`` names the same layer as ``#FFF`` here and in every rule — A3
+    dropped a notation-normalising fixer precisely because that is already true
+    everywhere else. Raises :class:`ValueError` on a colour it cannot read.
+    """
+    seen: List[str] = []
+    for value in values:
+        normalised = normalize_color(str(value).strip())
+        if normalised is None:
+            raise ValueError(f"{value!r} is not a colour")
+        if normalised not in seen:
+            seen.append(normalised)
+    return tuple(seen)
+
+
+@dataclass(frozen=True)
+class Removal:
+    """One colour somebody asked to leave unstitched, and what became of it.
+
+    One record per *pick* rather than per entry removed, because a pick that did
+    nothing is the case a panel has to be able to show: it is the only way to
+    offer putting back a colour that is not in the document to be pointed at.
+    """
+
+    color: str
+    #: The palette entry this pick names in this attempt, or ``None`` when it
+    #: names none — the colour is not in the palette the settings produced.
+    index: Optional[int] = None
+    #: Why the pick changed nothing; empty when it did.
+    says: str = ""
+
+    @property
+    def applied(self) -> bool:
+        return self.index is not None and not self.says
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"color": self.color, "applied": self.applied, "says": self.says}
+
+
+def plan_removals(prepared: Preprocessed, wanted: Sequence[str]) -> List[Removal]:
+    """Which palette entries a person's picks name here, and what could not be done.
+
+    C1's whole judgement, and it is three guards rather than a lookup — this is
+    the one place where a colour goes missing because somebody tapped a button,
+    so every way it can go wrong ends in a sentence rather than in a surprise:
+
+    - **the colour is not in this palette.** A pick is resolved per attempt, and
+      a retry that dropped the colour budget re-quantised the image underneath
+      it. :func:`~svg_embroidery.preprocess.entry_for_color` refuses anything
+      further off than a colour anyone would call the same one, so a removal
+      that no longer applies is reported instead of landing on its neighbour.
+    - **it is already unstitched**, because it is the paper B8 found. Removing
+      it changes nothing, and saying nothing would look like the button failed.
+    - **it is the last thing left.** A document with nothing in it is not a
+      conversion, so the removal that would empty it is declined and named.
+
+    One :class:`Removal` per pick, in the order they were picked.
+    """
+    quantisation = prepared.quantisation
+    painted = {
+        index for index in range(quantisation.colors) if quantisation.area(index) > 0
+    }
+    already = set() if prepared.background is None else {prepared.background}
+    removed: List[int] = []
+    picks: List[Removal] = []
+
+    for color in wanted:
+        index = entry_for_color(quantisation, hex_to_rgb(color))
+        if index is None or index not in painted:
+            picks.append(Removal(color, None, (
+                f"{color} is not a colour of this conversion — the palette was "
+                "worked out again at these settings and nothing in it is that "
+                "colour, so nothing was removed for it"
+            )))
+        elif index in already:
+            picks.append(Removal(color, index, (
+                f"{color} was already being left to the fabric as the background, "
+                "so removing it changes nothing"
+            )))
+        elif index in removed:
+            picks.append(Removal(color, index, (
+                f"{color} is near enough to a colour already picked that the two "
+                "name the same layer, so it removes nothing further"
+            )))
+        elif not painted - already - set(removed) - {index}:
+            picks.append(Removal(color, index, (
+                f"removing {color} would leave nothing to stitch at all, so it is "
+                "kept — a document with no thread in it is not a conversion"
+            )))
+        else:
+            removed.append(index)
+            picks.append(Removal(color, index))
+    return picks
+
+
+def skip_set(prepared: Preprocessed, removed: Sequence[int]) -> Tuple[int, ...]:
+    """The palette entries a trace leaves out: B8's paper, plus C1's picks.
+
+    One set rather than two arguments, and that is the whole of why C1 is a
+    small step. ``trapped_claims`` refuses to grow a layer under anything in it,
+    so the rule that stops a fringe forming around a dropped background is the
+    same rule that stops one forming around a colour somebody removed — it
+    cannot be applied to one and forgotten for the other, because there is only
+    one place it is applied.
+    """
+    background = prepared.background
+    entries = () if background is None else (background,)
+    return tuple(dict.fromkeys(tuple(entries) + tuple(removed)))
 
 
 @dataclass(frozen=True)
@@ -173,10 +335,59 @@ class Attempt:
     #: Anything the tracer thought worth saying — a colour left unstitched, or a
     #: colour tracer explaining that it could not leave one out.
     trace_notes: List[str] = field(default_factory=list)
+    #: C1: what a person asked to leave unstitched, and what became of each
+    #: pick. B8's background is *not* in here — it is ``prepared.background``,
+    #: because a different thing decided it.
+    picks: Tuple[Removal, ...] = ()
 
     @property
     def passes(self) -> bool:
         return not self.report.errors
+
+    @property
+    def removed(self) -> Tuple[int, ...]:
+        """The palette entries the picks actually took out, in pick order."""
+        return tuple(pick.index for pick in self.picks if pick.applied)
+
+    @property
+    def remove_notes(self) -> List[str]:
+        """One line per pick that changed nothing, and why."""
+        return [pick.says for pick in self.picks if pick.says]
+
+    @property
+    def skipped(self) -> Tuple[int, ...]:
+        """Every palette entry this document does not paint, whoever decided."""
+        return skip_set(self.prepared, self.removed)
+
+    @property
+    def layers(self) -> List[LayerInfo]:
+        """Every colour this attempt found, in the order it would be stitched.
+
+        Including the ones left unstitched, and that is the point: a panel that
+        listed only what is being sewn could not offer to put a colour back, and
+        a person looking at a hole wants to know what used to be in it.
+        """
+        quantisation = self.prepared.quantisation
+        background = self.prepared.background
+        out: List[LayerInfo] = []
+        for index in layer_order(quantisation):
+            share = quantisation.area(index)
+            if share <= 0:
+                continue
+            reason = (
+                "background"
+                if index == background
+                else "removed" if index in self.removed else ""
+            )
+            out.append(
+                LayerInfo(
+                    color=hex_color(quantisation.palette[index]),
+                    share=share,
+                    stitched=not reason,
+                    reason=reason,
+                )
+            )
+        return out
 
     @property
     def errors(self) -> List[Finding]:
@@ -320,6 +531,7 @@ class Conversion:
         for index, attempt in enumerate(self.attempts, start=1):
             for said_line in (
                 [f"{stage.name}: {stage.says}" for stage in attempt.prepared.stages]
+                + [f"remove: {note}" for note in attempt.remove_notes]
                 + [f"trace: {note}" for note in attempt.trace_notes]
                 + attempt.cleanup.notes()
             ):
@@ -352,6 +564,7 @@ class Conversion:
             "speck_area": self.settings.speck_area,
             "shapes": self.best.shapes,
             "nodes": self.best.nodes,
+            "layers": [layer.to_dict() for layer in self.best.layers],
             "attempts": [
                 {
                     "canvas_cm": round(attempt.settings.canvas_cm, 2),
@@ -705,13 +918,18 @@ def one_attempt(
             drop_background=settings.drop_background,
         ),
     )
+    # C1: a colour a person removed and B8's paper are one skip set from here
+    # on. Built once, so the trap that stops a fringe forming under a dropped
+    # layer cannot be applied to one of them and forgotten for the other.
+    picks = plan_removals(prepared, settings.remove)
+    removed = tuple(pick.index for pick in picks if pick.applied)
     traced = backend.trace(
         prepared.quantisation,
         canvas_mm=settings.canvas_mm,
         overlap=settings.overlap,
-        # Empty unless the pipeline both looked for a background and found one
-        # it was willing to drop, so this is the no-background path unchanged.
-        skip=() if prepared.background is None else (prepared.background,),
+        # Empty unless the pipeline found a background it was willing to drop
+        # and nobody picked a colour, so this is the pre-B8 path unchanged.
+        skip=skip_set(prepared, removed),
     )
     cleaned = b5.clean(traced.svg, profile)
     return Attempt(
@@ -722,6 +940,7 @@ def one_attempt(
         prepared=prepared,
         seconds=time.monotonic() - started,
         trace_notes=list(traced.notes),
+        picks=tuple(picks),
     )
 
 
@@ -763,6 +982,7 @@ def convert(
     name: str = "",
     settings: Optional[Settings] = None,
     drop_background: bool = True,
+    remove: Sequence[str] = (),
 ) -> Conversion:
     """Turn an image into an SVG this profile accepts, or explain why not.
 
@@ -775,6 +995,14 @@ def convert(
     every conversion did before B8. It is an escape hatch rather than a knob:
     the loop never turns it, because no failure it can see is answered by
     spending a thread on fabric.
+
+    ``remove`` names colours to leave unstitched by hand (C1) — the same
+    mechanism with a person choosing the index. Removing a colour does **not**
+    hand its thread back to the artwork the way B8's paper does: the budget
+    stays where it was, so every other layer comes back exactly as it was drawn
+    and the only difference is the hole. A colour spent on something you did not
+    want is still a colour you chose to spend; lowering the budget is the knob
+    for spending it elsewhere, and it is right there next to this one.
     """
     backend = backend or default_backend()
     if backend is None:
@@ -787,7 +1015,11 @@ def convert(
 
     source_side = max(source.width, source.height)
     start, note = initial_settings(profile, source_side)
-    current = replace(settings or start, drop_background=drop_background)
+    current = replace(
+        settings or start,
+        drop_background=drop_background,
+        remove=normalise_removals(remove) if remove else (settings or start).remove,
+    )
     if source_side >= current.work_side:  # caller-supplied settings may not need it
         note = ""
     # Once, outside the loop: no knob changes the resolution, and re-deriving
@@ -837,6 +1069,7 @@ def convert_file(
     backend: Optional[Backend] = None,
     tries: int = DEFAULT_TRIES,
     drop_background: bool = True,
+    remove: Sequence[str] = (),
 ) -> Conversion:
     """:func:`convert`, from a file on disk."""
     path = Path(path)
@@ -851,6 +1084,7 @@ def convert_file(
         tries=tries,
         name=str(path),
         drop_background=drop_background,
+        remove=remove,
     )
 
 
@@ -858,6 +1092,29 @@ def convert_file(
 
 
 LINE = "─" * 62
+
+
+#: How the reason a layer is not stitched reads in a terminal.
+WHY_BARE = {
+    "background": "left unstitched: the ground the corners found",
+    "removed": "left unstitched: you removed it",
+}
+
+
+def render_layers(layers: Sequence[LayerInfo]) -> List[str]:
+    """The threads, largest first, and what happened to the ones that are not.
+
+    Printed by every conversion because it is the list ``--remove`` names its
+    colours from — and because "3 ink(s)" says how many without saying which.
+    """
+    if not layers:
+        return []
+    out = ["threads, in the order they are sewn:"]
+    for layer in layers:
+        mark = "🧵" if layer.stitched else "  "
+        why = "" if layer.stitched else f"   {WHY_BARE.get(layer.reason, layer.reason)}"
+        out.append(f"   {mark} {layer.color}  {layer.share:>6.1%}{why}")
+    return out
 
 
 def render_conversion(
@@ -933,6 +1190,15 @@ def render_conversion(
         )
         for finding in best.errors:
             lines.append(f"   {finding.message}")
+    # C1: the colours are printed whether or not the run passed, because they
+    # are what --remove is named against. A list you have to turn -v on to see
+    # is a flag you cannot use without guessing.
+    lines.extend(render_layers(best.layers))
+    # A pick that did not happen is the same kind of news as A6's skip list, and
+    # the same rule applies: the run accounts for what it did not do as plainly
+    # as for what it did.
+    for note in best.remove_notes:
+        lines.append(f"⚠️  {note}")
     for finding in conversion.unmeasured:
         lines.append(f"ℹ️  not measured  {finding.rule_id}: {finding.message}")
 
@@ -942,7 +1208,7 @@ def render_conversion(
     # The shared stripper knows the verdict icons; these three are this
     # command's own, and a --no-color run has to be readable on a terminal that
     # cannot draw them.
-    plain = _strip_icons(text).replace("🖼", "Image:")
+    plain = _strip_icons(text).replace("🖼", "Image:").replace("🧵", "* ")
     return plain.replace("↻", "[retry]").replace("⏹", "[stop]")
 
 

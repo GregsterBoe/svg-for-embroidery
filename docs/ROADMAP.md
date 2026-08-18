@@ -2058,7 +2058,133 @@ changes what is drawn.** Phase A made this call once already, for text → paths
 **Revisit if:** the panel turns out to be the thing people work around rather
 than the thing they use.
 
-### C1. Remove a colour from the conversion · ⬜ NOT STARTED
+### C1. Remove a colour from the conversion · ✅ CLEARED
+
+**It was B8's mechanism with a human picking the index, and it stayed that
+size.** The whole step is one field — `Settings.remove` — resolved per attempt
+by `plan_removals` and unioned with the background into `skip_set`, which is the
+tuple `MaskBackend.trace` and `trapped_claims` already took. B8 wrote that
+parameter with C1 in its docstring ("B8's background, or a colour a person
+removed"), and the prediction held: **no new mechanism was needed, only the two
+things that decide what goes into it and the three guards on the way.**
+
+**Gate met**, all three items:
+
+- **no fringe.** A three-band fixture with the removed colour in the *middle* —
+  a stitched layer beneath it, so B4's trap really had been growing into it —
+  converts to **0 painted pixels out of 12,600** where the colour was. The
+  counterfactual is measured at the mechanism in `test_tracer` rather than
+  repeated here: 0 with the exclusion, 70 without, against a rim of 136.
+- **the page's re-check agrees with `svgemb check` on the file you download.**
+  Asserted through the same `/api/check` the SVG journey uses.
+- **the automatic drop and a hand-picked removal go down one path** — and the
+  test says it in the strongest available form: the same colour asked for both
+  ways produces the **same document byte for byte**, and the browser produces
+  the same bytes as `svgemb convert --remove`.
+
+That byte-identical gate needed a fixture chosen with care, which is a finding
+about B8 rather than about C1: on *three* inks on paper the +1 is earned, so the
+automatic route quantises at four entries and the hand route at three, and the
+two documents differ for a reason that has nothing to do with the exclusion. On
+**two** inks the extra entry merges back into its neighbour and both routes see
+one palette. The comparison only means anything with that isolated, so the test
+asserts the palettes match before it compares bytes.
+
+**A pick is a colour, not an index — this is the decision the step turns on.**
+An index only means something in the quantisation it came from, and *every* knob
+on the page re-quantises: drag the colour slider and entry 2 is a different
+colour. So removals travel as `#rrggbb` and are resolved per attempt by
+`entry_for_color`, nearest in CIE Lab. That is not a new question — it is the
+quantiser's own question asked of a colour instead of a pixel, which is exactly
+why an eyedropper on the *source* resolves to the layer that pixel was traced
+into.
+
+**And nearest is not enough on its own.** Nearest always finds something, so a
+pick replayed after a retry that re-quantised the colour away would land on its
+neighbour and delete a colour nobody chose — the one way this mechanism could
+lose someone's artwork. `REMOVAL_TOLERANCE` is 10 ΔE: far enough to survive the
+palette drifting under a pick (a just-noticeable difference is 1–2), near enough
+that it cannot cross to another colour of the design. Past it the answer is
+*none of them*, and the run says which pick did nothing. The project's own rule
+about a measurement you can't take, applied to a pointing finger.
+
+Three guards, and each one ends in a sentence rather than a surprise: the colour
+is not in this palette, it **was already the background** (removing it changes
+nothing, and saying nothing would look like the button failed), or it is the
+last thing left — *a document with no thread in it is not a conversion*.
+
+**Removing does not hand the thread back, and that is deliberate.** The obvious
+symmetry with B8 — free an entry, re-quantise at the same budget — is wrong
+here, and for a reason B8 itself supplies: the paper was *never* a thread, which
+is what made counting it as one a defect. A colour a person removes **is** a
+thread they chose not to spend. Handing it back would re-quantise, which
+rearranges every other layer under the finger that just tapped one; what you get
+instead is the document that colour was never in, with everything else exactly
+as it was drawn. The colour slider is immediately above, for spending the budget
+elsewhere.
+
+**The list is the part that makes the flag usable, and it was nearly missed.**
+`--remove` names a colour out of a palette the user has never seen — the CLI
+printed "3 ink(s)" and not *which* three. So every conversion now prints its
+threads, in stitching order, with the share of the design and what happened to
+the ones that are not sewn; without `-v`, because a list you have to turn on is
+not there when you need it. One computation (`Attempt.layers`) behind that, the
+JSON and the browser panel, so a colour you can read in a terminal is a colour
+you can name to the flag and a colour you can tap.
+
+**A pick that named nothing still needs a row.** It has no layer to point at and
+it is still in the list being sent, so without a record of it the panel could
+show it neither as a hole nor as something to put back — it would be invisible
+and stuck. `Removal` is therefore one record per *pick* rather than per entry
+removed, carrying what became of it either way.
+
+**The background checkbox is the other half of the same panel**:
+`--keep-background` as a switch, and it re-traces the moment it is ticked rather
+than waiting for the apply button — a control someone came to the page to use
+should not be the slowest thing on it.
+
+**Then the layout was wrong, which is a finding about C1 rather than about the
+page.** Three things landed in a settings card of equal-weight sliders with the
+new switch at the bottom, and the panel that the switch is *about* was in a
+different card below it. Fixed by putting the decisions where the thing they
+change is:
+
+- **the background gets a button on its own row** in the colour list — `Sew it`,
+  the same shape of decision as the `Remove` next to every other colour. The
+  checkbox stays as the setting it flips, because with the background sewn there
+  is no ground row left to put a button on, and that is the one direction a row
+  cannot serve.
+- **the switch is the first control in the settings, and `Absorb specks under`
+  is folded away** under *Less often*. It is the knob the loop turns for you
+  when a document has too many shapes to sew, and the only one here nobody
+  arrives wanting to set; at equal weight it was making the two that matter
+  harder to find.
+- **on a phone the controls sit under the result.** One column means the order
+  of that column is the whole layout: converting is one tap near the top, and
+  everything after it is a change made while looking at what came back. Above
+  the result, every tweak is scroll down, look, scroll back up. The two columns
+  dissolve with `display: contents` so they can interleave without a second copy
+  of the markup, and the ordering is asserted by a test rather than left to be
+  re-argued.
+
+**And two notes were deleted rather than reworded.** The colour panel opened
+with a paragraph about re-tracing avoiding a hairline, and the preview note
+explained which control to use for each hole. Both are true; neither helps
+anybody standing in front of the list deciding which colour to drop — the first
+is a fact about the implementation, and the second is a worse copy of a button
+that is already on screen. What is left is the fact the preview cannot show (how
+much of this is fabric, and which colours those are) and where to change it.
+Explanation belongs in this file and the README; the panel is for doing.
+
+**What was widened rather than added.** `bench.unstitched_mask` read
+`prepared.background` and now reads `attempt.skipped`, so `gaps` and `fit` keep
+answering their questions about *every* hole that was made on purpose. The
+benchmark never removes anything by hand, and the baseline is unchanged — but a
+metric that knew about one kind of deliberate hole and not the other would have
+been a trap set for whoever measured next.
+
+<details>
+<summary>Original plan for this step</summary>
 
 **This is B8's mechanism with a human picking the index.** B8 builds "do not
 stitch this palette entry" and points it at the paper the corner fill found; C1
@@ -2092,6 +2218,18 @@ of the layer beneath, the re-check on the page agrees with `svgemb check` on the
 downloaded file, and the automatic background drop and a hand-picked removal go
 down the same code path — asserted the way B7 asserted the loop, by comparing
 against the CLI rather than by inspection.
+
+</details>
+
+> **Still open: the eyedropper resolves against the layer list, not the raw
+> pixel.** The plan said the page reads a pixel out of the upload, and it does —
+> but it then picks the nearest *layer* in Lab and sends that layer's exact
+> colour, so the server is never guessing at a pixel that has been through
+> denoising and contrast since. That is better where the panel is on screen and
+> it is the reason the tolerance guard is rarely reached; what it does **not**
+> cover is picking a colour the conversion did not produce at all — the
+> quantiser merged it — which is a wish for a colour to be its own thread, and
+> that is C3.
 
 ### C2. Recolour a layer · ⬜ DEFERRED
 
@@ -2138,6 +2276,17 @@ answers does not arise. It arises on `logo-five-colour`, which is the one corpus
 image where the +1 is earned and where a fifth colour is still merged. **One
 generated image is not evidence**; a real design a shop complained about would
 be. The gate stands as written.
+
+**C1 has now landed too, and it moved the price rather than the gate.** The
+eyedropper is built, and picking a colour out of the source and resolving it to
+a palette entry in Lab is the half of C3 that touches the page — so what is left
+is the quantiser change alone: hold one entry fixed across the Lloyd passes, and
+the two guards below. That is worth writing down because it makes the step
+cheaper, **not** because it makes it due: the reason to wait is still that B8 may
+have removed the need, and a step built on appetite rather than on a complaint
+is the thing this gate exists to prevent. It also touches `quantise_lab`,
+`_merge_indistinguishable` and `_fewer_colours` — the code every benchmark
+number runs through — which is a second reason not to open it without a case.
 
 **What it is for, when the evidence does arrive.** Freeing a thread does not let
 you say where it goes. `quantise_lab` picks which box to split by `spread`,
@@ -2197,7 +2346,7 @@ B2 triage ──────────┘                                     
                                     ┌──────────────────────────────────────────────────┘
                                     │
                                     B8 background ──┬── C1 layer panel ── C2 recolour
-                                      ✅ CLEARED     │    ⬜ NOT STARTED     ⬜ DEFERRED
+                                      ✅ CLEARED     │    ✅ CLEARED         ⬜ DEFERRED
                                                     │
                                                     └── C3 pin a colour
                                                          ⬜ GATED ON B8's numbers
@@ -2219,7 +2368,9 @@ it could be built the day after B8 lands — but it should not be, because B8 ma
 remove the reason for it. It is the one step here whose gate is a measurement
 someone takes *before* starting rather than a bar the finished work has to
 clear, and that is on purpose: it is the difference between a roadmap written
-from use and one written from appetite.
+from use and one written from appetite. **C1 landing did not open it**: it
+supplies the eyedropper, which makes C3 cheaper, and the gate was never about
+cost.
 
 **Where Phase B stands: it is finished.** B0 through B7 are done, and what they
 add up to is one command: `svgemb convert photo.jpg -o design.svg` takes an
@@ -2246,6 +2397,21 @@ the freed thread back to the artwork) and Phase C is the half where a person
 picks the index instead of the corner fill. Neither is a new mechanism: B8 is
 the first "do not stitch this colour", and C1 is the same operation with a human
 at the controls.
+
+**C1 is now done, and it stayed the size B8 predicted.** One settings field, one
+resolver, three guards and a panel — no new exclusion, because `skip` already
+took a set and `trapped_claims` already refused to grow a layer under anything
+in it. The two routes produce the same document byte for byte, and the browser
+produces the same bytes as the flag. What it cost was not mechanism but
+judgement: a pick has to be a *colour* rather than an index because every knob
+re-quantises; nearest-in-Lab needs a tolerance or it deletes a neighbour; and a
+run has to print the colours it found, or the flag that names one is unusable.
+The one thing C1 deliberately does not do is hand the freed thread back — that
+is B8's move, and it is right there because the paper was never a thread.
+
+**What is left of Phase C is C2 and C3, and neither is scheduled.** C2 is small
+and least useful; C3 is gated on a complaint from a real design, which C1 does
+not supply and cheapness does not replace.
 
 B8 did not move that count — it converts nothing that did not convert before,
 and costs a few extra attempts at `embroidery-strict`. What it moved is what

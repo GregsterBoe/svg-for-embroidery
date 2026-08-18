@@ -516,6 +516,12 @@ def unstitched_mask(attempt, shot: Raster) -> Optional[List[bool]]:
     ``None`` when nothing was dropped, which is every conversion before B8 and
     every image with no paper to find — so `gaps` is computed exactly as it was.
 
+    **Everything the document leaves out**, not only the background: C1 lets a
+    person remove a colour by hand, and a hole somebody asked for is no more a
+    seam than the paper is. The benchmark never removes one — it converts
+    unattended — so this reads the same set the trace was given rather than
+    growing a second opinion about which holes were deliberate.
+
     Two things happen here and both matter. The mask is **resampled** to the
     render, because the attempt's working resolution and the resolution the
     benchmark renders at are chosen by different calls and need not agree. And
@@ -526,8 +532,8 @@ def unstitched_mask(attempt, shot: Raster) -> Optional[List[bool]]:
     edge of the drawing, not a seam between two layers, and counting it would
     put a floor under the column that no fix could reach.
     """
-    index = attempt.prepared.background
-    if index is None:
+    skipped = set(attempt.skipped)
+    if not skipped:
         return None
     quantisation = attempt.prepared.quantisation
     width, height = shot.width, shot.height
@@ -537,7 +543,7 @@ def unstitched_mask(attempt, shot: Raster) -> Optional[List[bool]]:
         target = y * width
         for x in range(width):
             source = source_row + x * quantisation.width // width
-            bare[target + x] = quantisation.indices[source] == index
+            bare[target + x] = quantisation.indices[source] in skipped
 
     grown = list(bare)
     for y in range(height):

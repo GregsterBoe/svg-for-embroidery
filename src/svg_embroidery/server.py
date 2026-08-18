@@ -52,6 +52,7 @@ from .convert import (
     clamp,
     initial_settings,
     limits_for,
+    normalise_removals,
     one_attempt,
     plan_next,
     prepare,
@@ -183,6 +184,26 @@ h1 { font-size: 1.25rem; margin: 0 0 4px; }
    what you give it on the left, what it made of that on the right. */
 .cols { display: grid; gap: 0 16px; grid-template-columns: 1fr; align-items: start; }
 @media (min-width: 900px) { .cols { grid-template-columns: minmax(300px, 380px) 1fr; } }
+/* On a phone there is one column, and the order that column runs in is the
+   whole of the layout. The controls go **after** the result rather than before
+   it: converting is one tap in the triage card at the top, and everything you
+   do afterwards — remove a colour, sew the background, sew it bigger — is a
+   change you make while looking at what you just got. Above the result, every
+   tweak is scroll down, look, scroll back up. Below it, the thing you are
+   judging is on screen and the controls are under your thumb.
+   `display: contents` is what lets the two columns interleave here without a
+   second copy of the markup. */
+@media (max-width: 899px) {
+  .col-in, .col-out { display: contents; }
+  #card-ruleset { order: 1; }
+  #card-source  { order: 2; }
+  #triage       { order: 3; }
+  #out          { order: 4; }
+  #fixout       { order: 5; }
+  #convertout   { order: 6; }
+  #layers       { order: 7; }
+  #knobs        { order: 8; }
+}
 /* Deliberately not sticky: the left column holds the sliders at its foot, and a
    sticky column taller than the window pins its own bottom out of reach. */
 .card {
@@ -285,6 +306,27 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em;
 @keyframes turn { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
 .note { color: var(--muted); font-size: .82rem; margin-top: 6px; }
+/* C1: one row per colour of the conversion, sewn or not */
+.layer { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+.layer .sw { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--line);
+             flex: none; }
+/* A colour that is not being sewn is shown as the hole it leaves, on the same
+   fabric the preview uses — the swatch has to say "gone", not "this colour". */
+.layer.bare .sw { background-color: #e9e5dd !important;
+  background-image:
+    linear-gradient(45deg, #d3ccc0 25%, transparent 25%, transparent 75%, #d3ccc0 75%),
+    linear-gradient(45deg, #d3ccc0 25%, transparent 25%, transparent 75%, #d3ccc0 75%);
+  background-size: 10px 10px; background-position: 0 0, 5px 5px; }
+.layer .who { flex: 1; min-width: 0; }
+.layer .hex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .84rem; }
+.layer.bare .hex { text-decoration: line-through; color: var(--muted); }
+.layer .why { margin: 0; border: 0; padding: 0; font-size: .74rem; }
+.layer button { width: auto; padding: 6px 10px; font-size: .8rem; background: transparent;
+                color: var(--fg); font-weight: 400; flex: none; }
+#preview.picking { cursor: crosshair; outline: 2px solid var(--accent); border-radius: 6px; }
+/* The knob nobody reaches for, folded away rather than dropped */
+details { margin-top: 4px; }
+summary { color: var(--muted); font-size: .8rem; cursor: pointer; padding: 6px 0; }
 footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top: 20px; }
 </style>
 </head>
@@ -301,7 +343,7 @@ footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top:
 
 <div class="cols">
 <div class="col-in">
-  <div class="card">
+  <div class="card" id="card-ruleset">
     <label for="profile">Ruleset</label>
     <select id="profile"></select>
     <div class="desc" id="profile-desc"></div>
@@ -315,7 +357,7 @@ footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top:
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" id="card-source">
     <div id="drop">
       <strong id="droptitle">Tap to choose a file</strong>
       <span id="dropsub">an SVG to check, or an image to convert</span>
@@ -326,6 +368,9 @@ footer { color: var(--muted); font-size: .78rem; text-align: center; margin-top:
   </div>
 
   <div id="triage"></div>
+  <!-- C1's panel above the sliders: after a conversion the colours are what
+       people reach for, and the sliders are what the loop already turned. -->
+  <div id="layers"></div>
   <div id="knobs"></div>
 </div>
 
@@ -424,8 +469,10 @@ $('drop').addEventListener('drop', e => {
 });
 
 function clearAll() {
-  ['out', 'fixout', 'convertout', 'triage', 'knobs'].forEach(id => $(id).innerHTML = '');
+  ['out', 'fixout', 'convertout', 'triage', 'knobs', 'layers']
+    .forEach(id => $(id).innerHTML = '');
   $('sourcenote').classList.add('hidden');
+  arm(false);
 }
 
 function isSvg(file) {
@@ -454,7 +501,7 @@ function load(file) {
   reader.onload = () => {
     const url = reader.result;                       // data:<type>;base64,<data>
     image = {name: file.name, url: url, data: url.slice(url.indexOf(',') + 1),
-             key: null, attempts: [], shown: -1, left: 'source'};
+             key: null, attempts: [], shown: -1, left: 'source', removed: []};
     $('preview').src = url;
     $('preview-box').classList.remove('hidden');
     assess();
@@ -652,8 +699,11 @@ function assess() {
   $('triage').innerHTML = '<div class="card"><span class="spin"></span>Measuring…</div>';
   $('convertout').innerHTML = '';
   $('knobs').innerHTML = '';
+  $('layers').innerHTML = '';
   image.attempts = [];
   image.shown = -1;
+  image.removed = [];
+  arm(false);
   post('api/image', {
     image: image.data, filename: image.name, profile: $('profile').value
   }).then(({ok, body}) => {
@@ -731,31 +781,49 @@ const KNOBS = [
   {key: 'colors', label: 'Colours', unit: '', step: 1,
    min: 'colors_min', max: 'colors_max',
    cost: 'costs part of the design: a colour dropped is gone'},
+  // Folded away rather than dropped: it is the knob the loop turns for you when
+  // a document has too many shapes to sew, and the one nobody comes here to set.
   {key: 'speck_area', label: 'Absorb specks under', unit: ' px', step: 1,
-   min: 'speck_min', max: 'speck_max',
+   min: 'speck_min', max: 'speck_max', advanced: true,
    cost: 'costs shapes this ruleset already calls too small to sew'}
 ];
+
+function sliderHtml(knob, settings, limits) {
+  const lo = limits[knob.min], hi = limits[knob.max];
+  const value = settings[knob.key];
+  const fixed = hi <= lo;
+  return `<div class="knob ${fixed ? 'fixed' : ''}">
+    <div class="top"><label for="k-${knob.key}">${knob.label}</label>
+      <span class="val" id="v-${knob.key}">${value}${knob.unit}</span></div>
+    <input type="range" id="k-${knob.key}" min="${lo}" max="${hi}" step="${knob.step}"
+           value="${value}" ${fixed ? 'disabled' : ''}>
+    <div class="cost">${lo}${knob.unit} – ${hi}${knob.unit} · ${knob.cost}</div>
+  </div>`;
+}
 
 function renderKnobs() {
   if (!image || !image.settings || !caps || !caps.tracer) return;
   const s = image.settings, limits = image.limits;
-  let html = '<div class="card"><h2>Settings</h2>';
-  for (const knob of KNOBS) {
-    const lo = limits[knob.min], hi = limits[knob.max];
-    const value = s[knob.key];
-    const fixed = hi <= lo;
-    html += `<div class="knob ${fixed ? 'fixed' : ''}">
-      <div class="top"><label for="k-${knob.key}">${knob.label}</label>
-        <span class="val" id="v-${knob.key}">${value}${knob.unit}</span></div>
-      <input type="range" id="k-${knob.key}" min="${lo}" max="${hi}" step="${knob.step}"
-             value="${value}" ${fixed ? 'disabled' : ''}>
-      <div class="cost">${lo}${knob.unit} – ${hi}${knob.unit} · ${knob.cost}</div>
+  // B8's switch first, and as a switch rather than a slider because it is not a
+  // quantity: it is the one decision here that changes what the *garment* is,
+  // and it is worth a thread. The two sliders follow, then the one nobody
+  // reaches for — three controls of equal weight made the important one hard to
+  // find, which is the whole of this layout.
+  let html = `<div class="card"><h2>Settings</h2>
+    <div class="row">
+      <input type="checkbox" id="k-bg" style="width:auto" ${s.drop_background ? 'checked' : ''}>
+      <label for="k-bg">Leave the background unstitched</label>
     </div>`;
+  for (const knob of KNOBS.filter(k => !k.advanced)) {
+    html += sliderHtml(knob, s, limits);
   }
   if (limits.canvas_open_ended) {
     html += `<div class="note">This ruleset sets no maximum size, so the size slider
       stops where the retry loop would: that end is this page's number, not the shop's.</div>`;
   }
+  html += '<details><summary>Less often</summary>'
+    + KNOBS.filter(k => k.advanced).map(k => sliderHtml(k, s, limits)).join('')
+    + '</details>';
   html += '<button id="retry">Convert with these settings</button>';
   html += `<div class="desc">One attempt, exactly as asked. Values outside what the
     ruleset allows are pulled back, and it says so.</div></div>`;
@@ -767,22 +835,191 @@ function renderKnobs() {
       $('v-' + knob.key).textContent = input.value + knob.unit;
     });
   }
-  $('retry').addEventListener('click', () => {
-    const wanted = {};
-    for (const knob of KNOBS) wanted[knob.key] = parseFloat($('k-' + knob.key).value);
-    runOnce(wanted);
-  });
+  // Ticking it is a decision, not a draft: it re-traces on the spot, the same
+  // way removing a colour does. Waiting for a second tap on "Convert with these
+  // settings" would make the one control people came here for the slowest.
+  $('k-bg').addEventListener('change', () => { if (!busy) runOnce(wantedSettings()); });
+  $('retry').addEventListener('click', () => runOnce(wantedSettings()));
   // The card is rebuilt after every attempt — including the ones the loop is
   // still working through — so it has to come back in whatever state the page
   // is in rather than in the state it was written in.
   $('retry').disabled = busy;
 }
 
+// Everything the next attempt is being asked for, from the controls that are on
+// screen. One reader, so a removal made in the layer panel and a slider dragged
+// in the settings card cannot end up in two different requests that undo each
+// other — every attempt carries the whole state of the page.
+function wantedSettings(extra) {
+  const wanted = {remove: (image.removed || []).slice()};
+  for (const knob of KNOBS) {
+    const input = $('k-' + knob.key);
+    if (input) wanted[knob.key] = parseFloat(input.value);
+  }
+  if ($('k-bg')) wanted.drop_background = $('k-bg').checked;
+  return Object.assign(wanted, extra || {});
+}
+
+// ------------------------------------------------- C1: the layers, by hand
+
+function renderLayers() {
+  const a = image && image.attempts[image.shown];
+  if (!a || !a.layers) { $('layers').innerHTML = ''; return; }
+  // No preamble. This is a list of things with a button each, and a paragraph
+  // about how re-tracing avoids a hairline is a fact about the implementation:
+  // true, and no help at all to someone deciding which colour to drop. What the
+  // row has to say is what it *is* and what the button will do.
+  let html = '<div class="card"><h2>Colours</h2>';
+
+  for (const layer of a.layers) {
+    const share = (layer.share * 100).toFixed(1) + '%';
+    const ground = layer.reason === 'background';
+    const why = ground
+      ? 'the ground the corners found — the garment shows through here'
+      : layer.reason === 'removed' ? 'you removed it' : '';
+    // The background gets its control on its own row rather than only as a
+    // checkbox in another card: it is the colour you are looking at, and "sew
+    // it" is the same shape of decision as the Remove next to every other one.
+    const button = ground
+      ? '<button class="sewbg">Sew it</button>'
+      : `<button class="pick" data-color="${escapeHtml(layer.color)}"
+           data-put="${layer.reason === 'removed' ? '1' : ''}"
+           >${layer.reason === 'removed' ? 'Put back' : 'Remove'}</button>`;
+    html += `<div class="layer ${layer.stitched ? '' : 'bare'}">
+      <span class="sw" style="background:${escapeHtml(layer.color)}"></span>
+      <span class="who"><span class="hex">${escapeHtml(layer.color)}</span> · ${share}
+        ${why ? `<div class="why">${escapeHtml(why)}</div>` : ''}</span>
+      ${button}
+    </div>`;
+  }
+
+  // A pick that named nothing in this palette has no row above to point at, and
+  // it is still in the list being sent — so it gets its own row, or there would
+  // be no way to take it back.
+  for (const pick of (a.picks || [])) {
+    if (pick.applied) continue;
+    html += `<div class="layer bare">
+      <span class="sw"></span>
+      <span class="who"><span class="hex">${escapeHtml(pick.color)}</span>
+        <div class="why">${escapeHtml(pick.says)}</div></span>
+      <button class="pick" data-color="${escapeHtml(pick.color)}" data-put="1">Put back</button>
+    </div>`;
+  }
+
+  html += `<button class="secondary" id="eyedrop">${picking
+    ? 'Now tap that colour in the image at the top…'
+    : 'Remove a colour by tapping it in the image'}</button>`;
+  // A tap that changes nothing has to say so, or it reads as a dead control.
+  if (image.pickSaid) html += `<div class="note">${escapeHtml(image.pickSaid)}</div>`;
+  html += '</div>';
+  $('layers').innerHTML = html;
+
+  for (const button of document.querySelectorAll('.pick')) {
+    button.addEventListener('click', () => {
+      setRemoved(button.dataset.color, !button.dataset.put);
+    });
+  }
+  for (const button of document.querySelectorAll('.sewbg')) {
+    // The same setting the checkbox holds, reached from the row it is about.
+    button.addEventListener('click', () => {
+      if (busy) return;
+      if ($('k-bg')) $('k-bg').checked = false;
+      runOnce(wantedSettings({drop_background: false}));
+    });
+  }
+  $('eyedrop').addEventListener('click', () => arm(!picking));
+  $('eyedrop').disabled = busy;
+}
+
+function setRemoved(color, removing) {
+  if (busy) return;
+  const held = (image.removed || []).filter(c => c !== color);
+  image.removed = removing ? held.concat([color]) : held;
+  image.pickSaid = '';
+  arm(false);
+  runOnce(wantedSettings());
+}
+
+let picking = false;
+
+function arm(on) {
+  picking = on && !!image;
+  $('preview').classList.toggle('picking', picking);
+  if ($('eyedrop')) {
+    $('eyedrop').textContent = picking
+      ? 'Tap a colour in the image above…' : 'Pick a colour from the image';
+  }
+}
+
+// The upload is already in the page as a data URI, so reading a pixel out of it
+// is a canvas away and needs no round trip — only the re-trace does.
+$('preview').addEventListener('click', e => {
+  if (!picking || mode !== 'image') return;
+  const img = $('preview'), box = img.getBoundingClientRect();
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const x = Math.floor((e.clientX - box.left) / box.width * canvas.width);
+  const y = Math.floor((e.clientY - box.top) / box.height * canvas.height);
+  const px = ctx.getImageData(Math.min(Math.max(x, 0), canvas.width - 1),
+                              Math.min(Math.max(y, 0), canvas.height - 1), 1, 1).data;
+  const hex = '#' + [px[0], px[1], px[2]]
+    .map(v => v.toString(16).padStart(2, '0')).join('');
+  const layer = nearestLayer(hex);
+  if (!layer) { arm(false); return; }
+  // The colour under the finger is a pixel of the *source*; the thing that can
+  // be removed is a layer of the conversion. Resolving that here means the page
+  // can say which layer it understood before it spends a trace on it — and the
+  // server resolves it the same way, in the same space, when the pick is
+  // replayed against a later attempt.
+  if (!layer.stitched) {
+    image.pickSaid = hex + ' is traced into ' + layer.color
+      + ', which is already left to the fabric — nothing to remove.';
+    arm(false);
+    renderLayers();
+    return;
+  }
+  setRemoved(layer.color, true);
+});
+
+function nearestLayer(hex) {
+  const a = image && image.attempts[image.shown];
+  if (!a || !a.layers || !a.layers.length) return null;
+  const target = labOf(hex);
+  let best = null, distance = null;
+  for (const layer of a.layers) {
+    const here = labOf(layer.color);
+    const d = Math.hypot(here[0] - target[0], here[1] - target[1], here[2] - target[2]);
+    if (distance === null || d < distance) { best = layer; distance = d; }
+  }
+  return best;
+}
+
+// CIE L*a*b*, D65 — the same conversion colors.py does, because "nearest" has
+// to mean the same thing on both sides of the request. RGB distance would pick
+// a different layer from the one the quantiser put that pixel in.
+function labOf(hex) {
+  const linear = [1, 3, 5].map(i => {
+    const c = parseInt(hex.substr(i, 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  const [r, g, b] = linear;
+  const pivot = v => v > Math.pow(6 / 29, 3)
+    ? Math.cbrt(v) : v / (3 * Math.pow(6 / 29, 2)) + 4 / 29;
+  const x = pivot((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
+  const y = pivot((r * 0.2126 + g * 0.7152 + b * 0.0722) / 1.0);
+  const z = pivot((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
 let busy = false, stopped = false;
 
 function setBusy(on) {
   busy = on;
-  for (const id of ['convert', 'retry']) if ($(id)) $(id).disabled = on;
+  for (const id of ['convert', 'retry', 'eyedrop', 'k-bg']) if ($(id)) $(id).disabled = on;
+  for (const button of document.querySelectorAll('.pick, .sewbg')) button.disabled = on;
 }
 
 // One attempt per request. The loop traces up to four times, and a phone that
@@ -826,7 +1063,13 @@ async function runLoop() {
   stopped = false;
   image.attempts = [];
   image.shown = -1;
-  let settings = null;                 // null: start where the ruleset starts
+  // Where the ruleset starts, except for the two things nothing else can decide:
+  // a colour someone removed and the background switch survive a fresh run,
+  // because losing them silently is worse than restarting with them.
+  let settings = (image.removed || []).length || ($('k-bg') && !$('k-bg').checked)
+    ? {remove: (image.removed || []).slice(),
+       drop_background: $('k-bg') ? $('k-bg').checked : true}
+    : null;
   let broke = false;
   try {
     for (let n = 0; n < (image.maxTries || 4); n++) {
@@ -857,7 +1100,12 @@ function show(index) {
   image.left = index > 0 ? String(index - 1) : 'source';
   image.settings = image.attempts[index].settings;
   image.limits = image.attempts[index].limits;
+  // Looking at an earlier try means looking at what *it* was asked for, so the
+  // panel and the sliders come back to that attempt's state rather than staying
+  // on the last one's. Removing a colour from here removes it from this try.
+  image.removed = (image.settings.remove || []).slice();
   renderKnobs();
+  renderLayers();
   renderConvert();
 }
 
@@ -885,10 +1133,15 @@ function took(body) {
   image.settings = body.settings;
   image.limits = body.limits;
   image.bestIndex = body.best_index;
+  // What the server made of the picks, not what the page asked for: a colour
+  // clamped away by the loop is out of the settings it echoes back, and the
+  // panel has to show the attempt that exists.
+  image.removed = (body.settings.remove || []).slice();
   // The left pane defaults to the try before this one: the comparison worth
   // making is 8 cm against 12 cm, not image against SVG.
   image.left = body.index > 0 ? String(body.index - 1) : 'source';
   renderKnobs();
+  renderLayers();
 }
 
 function renderAttempts() {
@@ -998,15 +1251,22 @@ function paneOptions(selected) {
 }
 
 function unstitchedHtml(a) {
-  // B8: the hole is the point, so it is said in words as well as drawn. The
-  // chequer behind the preview is the fabric — without it a dropped background
-  // and a white one look identical, which is the whole trap this step is in.
-  if (!a.unstitched) return '';
-  const share = (a.unstitched.share * 100).toFixed(0);
-  return `<div class="note">🧵 ${escapeHtml(a.unstitched.color)} is the ground, not a
-    thread: ${share}% of the design is left unstitched, so the garment shows through
-    there. The chequer behind the preview is that fabric. Convert with
-    <code>--keep-background</code> to stitch it instead, at the cost of one colour.</div>`;
+  // B8: the hole is the point, so it is said in words as well as drawn — the
+  // chequer behind the preview is the fabric, and without being told, a dropped
+  // background and a white one are the same picture.
+  //
+  // What this does *not* do any more is explain how to change it. Every colour
+  // here is a row in the Colours panel with a button on it, so a paragraph
+  // saying which control to use is a worse copy of the control. The note states
+  // the fact and names where the buttons are.
+  const bare = (a.layers || []).filter(l => !l.stitched);
+  if (!bare.length) return '';
+  const share = bare.reduce((sum, l) => sum + l.share, 0) * 100;
+  const named = bare.map(l => escapeHtml(l.color)
+    + (l.reason === 'background' ? ' (the ground)' : ' (you removed it)'));
+  return `<div class="note">🧵 ${share.toFixed(0)}% of this is left unstitched —
+    the chequer is the garment showing through: ${named.join(', ')}.
+    Change either in <b>Colours</b>.</div>`;
 }
 
 function showLeft() {
@@ -1381,19 +1641,33 @@ def _settings_dict(settings: Settings) -> Dict[str, Any]:
         "colors": settings.colors,
         "speck_area": settings.speck_area,
         "work_side": settings.work_side,
+        "drop_background": settings.drop_background,
+        "remove": list(settings.remove),
         "describe": settings.describe(),
     }
 
 
 def _settings_from(data: Any, current: Settings) -> Settings:
-    """The knobs a slider moved, on top of the ones this attempt started with."""
+    """The knobs a slider moved, on top of the ones this attempt started with.
+
+    Two of them are not sliders: the background switch and the list of colours
+    somebody removed (C1). They travel here rather than in a request of their
+    own because they are settings of an attempt like any other — carried into
+    the next try by the same ``next.settings`` the loop already hands back, so
+    a removal survives a retry without the page having to remember it.
+    """
     if not isinstance(data, dict):
         return current
+    wanted = data.get("remove", current.remove)
+    if not isinstance(wanted, (list, tuple)):
+        raise ValueError("remove takes a list of colours")
     return replace(
         current,
         canvas_mm=float(data.get("canvas_cm", current.canvas_cm)) * 10.0,
         colors=int(data.get("colors", current.colors)),
         speck_area=int(data.get("speck_area", current.speck_area)),
+        drop_background=bool(data.get("drop_background", current.drop_background)),
+        remove=normalise_removals(wanted),
     )
 
 
@@ -1473,7 +1747,13 @@ def _attempt_payload(
         "seconds": round(attempt.seconds, 2),
         "report": attempt.report.to_dict(),
         "notes": _attempt_notes(attempt, upscaled if index == 0 else ""),
-        "unstitched": _unstitched(attempt),
+        # C1: every colour this attempt found, sewn or not, so the panel can
+        # list what is there, what left and what to offer putting back.
+        "layers": [layer.to_dict() for layer in attempt.layers],
+        # ...and one record per pick, honoured or not. A pick that named nothing
+        # here has no layer to point at, so without this the panel could show it
+        # neither as a hole nor as something to put back.
+        "picks": [pick.to_dict() for pick in attempt.picks],
         "next": next_up,
     }
 
@@ -1487,24 +1767,6 @@ def _attempt_notes(attempt: Attempt, upscaled: str) -> List[str]:
     return notes
 
 
-def _unstitched(attempt: Attempt) -> Optional[Dict[str, Any]]:
-    """B8's dropped background, for a page that has to make a hole visible.
-
-    The CLI can print "left unstitched" and be understood. A page cannot: it
-    renders the document onto whatever is behind it, so a hole where the paper
-    was looks exactly like white paint — the same trap ``visual.py`` has, where
-    compositing onto white before comparing makes a dropped background score
-    zero difference. So the page is told which colour left and how much of the
-    picture it was, and previews the result on a ground that is not white.
-    """
-    index = attempt.prepared.background
-    if index is None:
-        return None
-    quantisation = attempt.prepared.quantisation
-    return {
-        "color": "#{:02x}{:02x}{:02x}".format(*quantisation.palette[index]),
-        "share": round(quantisation.area(index), 4),
-    }
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, verbose: bool = False) -> None:

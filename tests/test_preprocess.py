@@ -7,8 +7,10 @@ from svg_embroidery.colors import color_distance
 from svg_embroidery.preprocess import (
     LOW_CONTRAST,
     MIN_SEPARATION,
+    REMOVAL_TOLERANCE,
     Recipe,
     background_entry,
+    entry_for_color,
     clean,
     contrast_span,
     denoise,
@@ -598,3 +600,34 @@ def test_the_stages_are_reported_against_the_row():
     entries = [entry for entry in load_corpus() if entry.name == "scan-clean"]
     row = run(entries, preprocess=True).rows[0]
     assert any(note.startswith("preprocess/denoise") for note in row.notes)
+
+
+# -- C1: which entry a person meant --------------------------------------
+
+def test_a_picked_colour_names_the_entry_it_would_have_been_quantised_into():
+    """The quantiser's own question, asked of a colour instead of a pixel."""
+    quantisation = quantise_lab(two_inks_on_paper(), 3)
+    palette = [tuple(entry) for entry in quantisation.palette]
+
+    for index, entry in enumerate(palette):
+        assert entry_for_color(quantisation, entry) == index
+    # ...and a colour off the palette lands where a pixel of it would: a red
+    # nudged by a couple of levels is still that entry, not its neighbour.
+    red = next(i for i, e in enumerate(palette) if e[0] > e[1] and e[0] > e[2])
+    assert entry_for_color(quantisation, (palette[red][0] - 3, palette[red][1] + 2,
+                                          palette[red][2])) == red
+
+
+def test_a_colour_no_entry_is_near_names_nothing_rather_than_the_closest():
+    """The guard that makes a pick safe to replay against a later attempt.
+
+    A removal made against one palette is resolved again against the next, and
+    a retry may have re-quantised the colour away. Taking the nearest thing left
+    would delete a colour nobody picked, so past the tolerance the answer is
+    "none of them" and the run says so.
+    """
+    quantisation = quantise_lab(two_inks_on_paper(), 3)
+    assert entry_for_color(quantisation, (0, 255, 0)) is None
+    # The tolerance is what decides it, not the absence of a nearest entry.
+    assert entry_for_color(quantisation, (0, 255, 0), tolerance=1000.0) is not None
+    assert REMOVAL_TOLERANCE > MIN_SEPARATION  # or no pick could ever resolve

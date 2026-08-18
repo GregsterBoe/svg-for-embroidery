@@ -337,6 +337,7 @@ def test_the_starting_settings_and_slider_ranges_come_from_the_profile(base_url)
     _, body = upload(base_url)
     assert body["settings"] == {
         "canvas_cm": 8.0, "colors": 2, "speck_area": 1, "work_side": 160,
+        "drop_background": True, "remove": [],
         "describe": "8.0 cm, 2 colour(s)",
     }
     assert body["limits"]["canvas_min_cm"] == 8.0
@@ -586,17 +587,27 @@ def test_a_dropped_background_is_named_rather_than_left_to_be_noticed(base_url):
     paper unstitched — the largest single thing in the picture, and invisible
     in a preview unless the page is told. It gets both: the colour and its
     share as data, and the trace's own sentence among the notes.
+
+    C1 widened the data from *the* dropped background to the whole colour list,
+    since a person can drop one too — so the background is now a layer that
+    names what decided it rather than a field of its own.
     """
     _, start = upload(base_url)
     _, attempt = post_json(
         base_url + "/api/convert", {"key": start["key"], "profile": "embroidery-strict"}
     )
-    assert attempt["unstitched"], attempt["notes"]
-    assert attempt["unstitched"]["color"].startswith("#")
-    assert 0.0 < attempt["unstitched"]["share"] < 1.0
+    ground = [layer for layer in attempt["layers"] if layer["reason"] == "background"]
+    assert ground, attempt["notes"]
+    assert ground[0]["color"].startswith("#")
+    assert 0.0 < ground[0]["share"] < 1.0
+    assert ground[0]["stitched"] is False
     assert any("left unstitched" in note for note in attempt["notes"])
     # ...and the colour that left is not painted anywhere in the document.
-    assert attempt["unstitched"]["color"] not in attempt["svg"].lower()
+    assert ground[0]["color"] not in attempt["svg"].lower()
+    # Everything else in the list is, which is what makes the list a legend.
+    for layer in attempt["layers"]:
+        if layer["stitched"]:
+            assert layer["color"] in attempt["svg"].lower()
 
 
 def test_the_page_previews_a_conversion_on_fabric_rather_than_on_white(base_url):
@@ -608,5 +619,147 @@ def test_the_page_previews_a_conversion_on_fabric_rather_than_on_white(base_url)
     _, body = get(base_url + "/")
     assert ".ba img.fabric" in body
     assert 'id="ba-right" class="fabric"' in body
-    assert "is the ground, not a" in body
-    assert "--keep-background" in body
+    assert "the chequer is the garment showing through" in body
+    # C1 gave the page the switch the note used to send people to the CLI for,
+    # and a button on the ground's own row in the colour list.
+    assert "Leave the background unstitched" in body
+    assert "Sew it" in body
+
+
+# -- C1: removing a colour from the browser --------------------------------
+
+@needs_tracer
+def test_a_colour_removed_in_the_browser_matches_the_command_line(base_url):
+    """C1's gate, asserted the way B7 asserted the loop: against the CLI.
+
+    The page has no exclusion of its own — it names a colour and the same
+    pipeline runs. So the document a tap produces is the document
+    ``svgemb convert --remove`` produces, byte for byte, and the page's re-check
+    is the verdict on the file that will be downloaded rather than on a
+    near-enough relative of it.
+    """
+    from svg_embroidery.convert import convert
+    from svg_embroidery.profiles import load_profile
+    from svg_embroidery.raster import load_image
+
+    _, start = upload(base_url, profile="embroidery-basic")
+    _, first = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-basic", "reset": True},
+    )
+    ink = next(layer for layer in first["layers"] if layer["stitched"])
+
+    _, cut = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-basic",
+         "settings": dict(first["settings"], remove=[ink["color"]])},
+    )
+    expected = convert(
+        load_image(CONVERTIBLE), load_profile("embroidery-basic"),
+        settings=None, remove=[ink["color"]], tries=1,
+    )
+    assert cut["svg"] == expected.svg
+    assert ink["color"] not in cut["svg"].lower()
+    assert [l for l in cut["layers"] if l["reason"] == "removed"][0]["color"] == ink["color"]
+    # ...and the page's own checker agrees about the file it is offering.
+    _, rechecked = post_json(
+        base_url + "/api/check",
+        {"svg": cut["svg"], "profile": "embroidery-basic"},
+    )
+    assert rechecked["counts"]["error"] == cut["report"]["counts"]["error"]
+
+
+@needs_tracer
+def test_the_background_switch_is_a_setting_like_any_other(base_url):
+    """B8's ``--keep-background``, as the checkbox the note used to point away from."""
+    _, start = upload(base_url)
+    _, dropped = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict", "reset": True},
+    )
+    _, kept = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict",
+         "settings": dict(dropped["settings"], drop_background=False)},
+    )
+    ground = next(l for l in dropped["layers"] if l["reason"] == "background")
+
+    assert kept["settings"]["drop_background"] is False
+    assert not [l for l in kept["layers"] if not l["stitched"]]
+    assert ground["color"] in kept["svg"].lower()
+
+
+@needs_tracer
+def test_a_pick_the_palette_no_longer_has_comes_back_as_a_sentence(base_url):
+    """And as a record, so the page has something to offer putting back.
+
+    A pick that names nothing has no layer to be a row of, and it is still in
+    the list being sent — without ``picks`` it would be invisible and stuck.
+    """
+    _, start = upload(base_url)
+    _, attempt = post_json(
+        base_url + "/api/convert",
+        {"key": start["key"], "profile": "embroidery-strict",
+         "settings": {"remove": ["#00ff00"]}},
+    )
+    assert attempt["picks"] == [
+        {"color": "#00ff00", "applied": False, "says": attempt["picks"][0]["says"]}
+    ]
+    assert "is not a colour of this conversion" in attempt["picks"][0]["says"]
+    assert not [l for l in attempt["layers"] if l["reason"] == "removed"]
+
+
+def test_a_colour_the_server_cannot_read_is_a_message_not_a_crash(base_url):
+    status, body = post_json(
+        base_url + "/api/convert",
+        {"key": "0" * 16, "profile": "embroidery-basic", "settings": {"remove": "red"}},
+    )
+    # The forgotten-image answer comes first — but the settings are checked, and
+    # a bad one is a 400 rather than a stack trace, exactly like the sliders.
+    assert status in (400, 409)
+
+
+def test_the_page_carries_the_layer_panel_and_picks_locally(base_url):
+    """The eyedropper reads the upload the page already holds — no round trip."""
+    _, body = get(base_url + "/")
+    assert 'id="layers"' in body
+    assert "Remove a colour by tapping it in the image" in body
+    assert "getImageData" in body          # the pick is a canvas readback
+    assert "function labOf" in body        # ...resolved in Lab, as the server does
+    assert "Put back" in body
+
+
+def test_the_controls_sit_under_the_result_on_a_phone(base_url):
+    """One column means the order of that column *is* the layout.
+
+    Converting is one tap near the top; everything after it — remove a colour,
+    sew the background, sew it bigger — is a change made while looking at what
+    came back. Above the result, each tweak is scroll down, look, scroll up.
+    """
+    import re
+
+    _, body = get(base_url + "/")
+    phone = re.search(r"@media \(max-width: 899px\) \{(.+?)\n\}", body, re.S)
+    assert phone, "the phone ordering is the layout; it has to be there"
+    order = {
+        name: int(value)
+        for name, value in re.findall(r"#([\w-]+)\s*\{ order: (\d+); \}", phone.group(1))
+    }
+    assert order["triage"] < order["convertout"] < order["layers"] < order["knobs"]
+    # ...and the two columns have to dissolve, or nothing can interleave.
+    assert "display: contents" in phone.group(1)
+
+
+def test_the_background_is_reachable_from_the_colour_it_is(base_url):
+    """It is a colour in the list before it is a setting in another card.
+
+    The checkbox is still the setting — it has to be, since with the background
+    sewn there is no ground row to put a button on — but the common direction is
+    *seeing* the hole and wanting it filled, and that starts at the row.
+    """
+    _, body = get(base_url + "/")
+    assert 'class="sewbg"' in body
+    assert "the ground the corners found" in body
+    # Ticking the box re-traces on the spot rather than waiting for a second tap
+    # on the apply button: it is the control people came for.
+    assert "$('k-bg').addEventListener('change'" in body

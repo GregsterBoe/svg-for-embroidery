@@ -110,6 +110,15 @@ BACKGROUND_TOLERANCE = 36
 #: finding the whole picture — so it is discarded.
 MAX_BACKGROUND = 0.92
 
+#: How much of the paper the fill found has to land in a *single* palette entry
+#: before that entry is accepted as the background (B8). Below it the paper was
+#: split across entries, and dropping one would leave the rest stitched.
+BACKGROUND_COHERENCE = 0.80
+
+#: ...and how much of that entry has to be paper. Below it the entry is shared
+#: with artwork, and dropping it would delete drawing rather than fabric.
+BACKGROUND_PURITY = 0.60
+
 #: Two palette entries closer than this in CIE Lab are the same colour, and are
 #: merged rather than kept. A just-noticeable difference is around 1–2 and a
 #: thread you could actually buy is much further off than that, so 2.5 only ever
@@ -138,6 +147,9 @@ class Recipe:
     source of truth about what this shop can stitch.
     """
 
+    #: The colour budget for the **artwork**. When :attr:`drop_background` is
+    #: set the quantiser is asked for one more than this and the extra entry is
+    #: the paper, so the shop's threads all go to the drawing — see :func:`run`.
     colors: int
     #: Radius of the kernel that asks the profile's minimum-width question, in
     #: working pixels — B1's :func:`~svg_embroidery.bench.scale_for` computes it.
@@ -149,6 +161,10 @@ class Recipe:
     #: **One means absorb nothing**, and that is the default on purpose — see
     #: :func:`despeckle` for the measurements behind it.
     speck_area: int = 1
+    #: B8: identify the paper and hand its palette entry back so the tracer can
+    #: leave it unstitched. Off here and on in the conversion path, because the
+    #: measuring path must keep grading the image it was handed.
+    drop_background: bool = False
 
 
 @dataclass
@@ -160,6 +176,12 @@ class Preprocessed:
     #: After stages 5–6: the labels a tracer turns into paths.
     quantisation: Quantisation
     stages: List[Stage] = field(default_factory=list)
+    #: B8: the palette entry that is the paper, or ``None`` when the pipeline was
+    #: not asked to find one or could not identify one it was willing to drop.
+    #: The pixels keep their label — the tracer is told to leave the layer out,
+    #: which is not the same as relabelling them and is why this is an index
+    #: rather than a change to :attr:`quantisation`.
+    background: Optional[int] = None
 
     def note(self, name: str, says: str) -> None:
         self.stages.append(Stage(name, says))
@@ -184,6 +206,10 @@ def _as_raster(pixels: Sequence[RGB], width: int, height: int) -> Raster:
 
 def _percent(value: float) -> str:
     return f"{value * 100:.0f}%"
+
+
+def _hex(color: Sequence[int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*color)
 
 
 # ------------------------------------------------------- 1. upscale a tiny source
@@ -222,43 +248,60 @@ def upscale(raster: Raster, min_side: int) -> Raster:
 # --------------------------------------------------- 2. background handling
 
 
-def flatten_background(
+@dataclass(frozen=True)
+class Background:
+    """The paper: which colour it is, and exactly which pixels are it.
+
+    The mask is the part B8 needs. Matching a *colour* through the rest of the
+    pipeline does not work — denoising and contrast both move it, so the seed
+    read here and the palette entry found after quantisation are not the same
+    number. Which pixels were paper does not change, so that is what is carried.
+    """
+
+    color: RGB
+    #: One flag per pixel, row-major, True where this pixel is paper.
+    mask: List[bool]
+    #: Share of the image the mask covers.
+    share: float
+
+
+def find_background(
     raster: Raster, tolerance: int = BACKGROUND_TOLERANCE
-) -> Tuple[Raster, float]:
-    """Find the paper colour from the corners, then make *all* the paper that colour.
+) -> Optional[Background]:
+    """Which pixels are the paper, found from the corners.
 
     Paper is never one colour: a scanner gives it a gradient and a grain, and
     both survive quantisation as speckle. The corners are the one part of an
     image that is background almost by definition, so a flood fill starts there
     and stops where the colour stops matching.
 
-    **The fill identifies the colour; the snap applies it.** Filling only what
-    the corners can reach leaves every enclosed region behind — the paper inside
-    a drawn ring is background by any reading, and no path from a corner gets to
-    it. On ``scan-clean`` that stranded a quarter of the paper with its grain
-    intact, which is enough to keep the image from measuring flat. So the
+    **The fill identifies the colour; the mask says where it is.** Filling only
+    what the corners can reach leaves every enclosed region behind — the paper
+    inside a drawn ring is background by any reading, and no path from a corner
+    gets to it. On ``scan-clean`` that stranded a quarter of the paper with its
+    grain intact, which is enough to keep the image from measuring flat. So the
     connected fill establishes *which* colour the paper is, and then every pixel
-    within ``tolerance`` of it is snapped to it wherever it sits.
+    within ``tolerance`` of it counts as paper wherever it sits.
 
-    Returns the image and the share of it that ended up as background. A fill
-    that swallows more than :data:`MAX_BACKGROUND` of the picture has found the
-    picture rather than its background, and is discarded rather than applied.
+    ``None`` when there is no background to find: a fill that swallows more than
+    :data:`MAX_BACKGROUND` of the picture has found the picture rather than its
+    background, and an image too small to have corners has neither.
     """
     width, height = raster.width, raster.height
-    pixels = rgb_pixels(raster)
     if width < 2 or height < 2:
-        return raster, 0.0
+        return None
+    pixels = rgb_pixels(raster)
 
     corners = [pixels[0], pixels[width - 1], pixels[(height - 1) * width], pixels[-1]]
     seed = max(set(corners), key=corners.count)
 
     seen = bytearray(width * height)
     stack = [0, width - 1, (height - 1) * width, width * height - 1]
-    filled: List[int] = []
+    filled = 0
     for start in stack:
         if not seen[start]:
             seen[start] = 1
-            filled.append(start)
+            filled += 1
     while stack:
         index = stack.pop()
         y, x = divmod(index, width)
@@ -272,18 +315,35 @@ def flatten_background(
             if sum(abs(color[c] - seed[c]) for c in range(3)) <= tolerance:
                 seen[neighbour] = 1
                 stack.append(neighbour)
-                filled.append(neighbour)
+                filled += 1
 
-    if len(filled) / (width * height) > MAX_BACKGROUND:
+    if filled / (width * height) > MAX_BACKGROUND:
+        return None
+
+    mask = [
+        sum(abs(color[c] - seed[c]) for c in range(3)) <= tolerance for color in pixels
+    ]
+    return Background(color=seed, mask=mask, share=sum(mask) / (width * height))
+
+
+def flatten_background(
+    raster: Raster, tolerance: int = BACKGROUND_TOLERANCE
+) -> Tuple[Raster, float]:
+    """Make all the paper exactly one colour, so its grain stops being artwork.
+
+    :func:`find_background` decides what the paper is; this paints it. Returns
+    the image and the share of it that ended up as background — zero, and the
+    image untouched, when there was no background to find.
+    """
+    found = find_background(raster, tolerance)
+    if found is None:
         return raster, 0.0
-
-    out = list(pixels)
-    painted = 0
-    for index, color in enumerate(pixels):
-        if sum(abs(color[c] - seed[c]) for c in range(3)) <= tolerance:
-            out[index] = seed
-            painted += 1
-    return _as_raster(out, width, height), painted / (width * height)
+    pixels = rgb_pixels(raster)
+    out = [
+        found.color if is_paper else color
+        for color, is_paper in zip(pixels, found.mask)
+    ]
+    return _as_raster(out, raster.width, raster.height), found.share
 
 
 # ------------------------------------------------------------- 3. denoising
@@ -688,7 +748,9 @@ def despeckle(quantisation: Quantisation, min_area: int) -> Tuple[Quantisation, 
 # ------------------------------------------------------------- the pipeline
 
 
-def clean(raster: Raster, recipe: Recipe) -> Tuple[Raster, List[Stage]]:
+def clean(
+    raster: Raster, recipe: Recipe
+) -> Tuple[Raster, List[Stage], Optional[Background]]:
     """Stages 2–4: everything that produces an image rather than labels.
 
     **The grain is measured before anything is done to it.** Flattening the
@@ -697,12 +759,27 @@ def clean(raster: Raster, recipe: Recipe) -> Tuple[Raster, List[Stage]]:
     image: ``scan-noisy`` estimated 37 as it arrived and 0 once its paper had
     been snapped, so the filter sized itself for an image with no grain and left
     the grain alone. Order matters here, and only here.
+
+    Returns the paper it found alongside the image, because B8 needs to know
+    *where* it was and stages 3–4 move the colour it was.
     """
     stages: List[Stage] = []
     sigma = NOISE_FACTOR * noise_sigma(raster) if recipe.denoise else None
+    found: Optional[Background] = None
 
     if recipe.background:
-        raster, share = flatten_background(raster)
+        found = find_background(raster)
+        share = found.share if found is not None else 0.0
+        if found is not None:
+            pixels = rgb_pixels(raster)
+            raster = _as_raster(
+                [
+                    found.color if is_paper else color
+                    for color, is_paper in zip(pixels, found.mask)
+                ],
+                raster.width,
+                raster.height,
+            )
         stages.append(
             Stage(
                 "background",
@@ -727,14 +804,245 @@ def clean(raster: Raster, recipe: Recipe) -> Tuple[Raster, List[Stage]]:
             )
         )
 
-    return raster, stages
+    return raster, stages, found
+
+
+def background_entry(
+    quantisation: Quantisation, found: Background
+) -> Optional[int]:
+    """Which palette entry is the paper, or ``None`` when none of them safely is.
+
+    Decided on **pixels rather than colour**: the entry holding most of the mask
+    that :func:`find_background` marked. Matching the seed colour would be
+    matching a number that denoising and contrast have both had a go at since.
+
+    Two guards, and they are the step rather than a detail — this is the one
+    place where dropping the wrong entry deletes somebody's drawing:
+
+    - **the paper has to be in one entry.** Below
+      :data:`BACKGROUND_COHERENCE` of the mask in a single entry, the quantiser
+      split the paper across several and dropping one would leave the rest
+      stitched, in a colour chosen to blend with fabric that is no longer there.
+    - **that entry has to be mostly paper.** Below :data:`BACKGROUND_PURITY`,
+      the entry is shared with artwork of a similar colour, and dropping it
+      would take the artwork with it.
+
+    Either way the answer is ``None``, which the caller reads as *convert this
+    the way it was converted before B8*. A background that cannot be identified
+    safely is not a failure, it is a conversion that keeps its background — the
+    project's own rule that a measurement you can't take costs you the
+    measurement and never the run.
+    """
+    counts: Dict[int, int] = {}
+    for position, is_paper in enumerate(found.mask):
+        if is_paper:
+            index = quantisation.indices[position]
+            counts[index] = counts.get(index, 0) + 1
+    if not counts:
+        return None
+
+    index, hits = max(counts.items(), key=lambda item: item[1])
+    if hits < sum(counts.values()) * BACKGROUND_COHERENCE:
+        return None
+    if hits < quantisation.indices.count(index) * BACKGROUND_PURITY:
+        return None
+    return index
+
+
+def _survives_the_needle(
+    quantisation: Quantisation, index: int, radius: int
+) -> bool:
+    """Is any part of this palette entry as wide as the profile's thinnest stitch?
+
+    An erosion by ``radius``, which is A5's question — *does a disc the width of
+    a stitch fit inside this shape* — asked of a colour rather than of a
+    contour, and answered on the pixel grid so it needs nothing installed.
+    """
+    width, height = quantisation.width, quantisation.height
+    if radius < 1:
+        return True
+    mask = [value == index for value in quantisation.indices]
+
+    # Separable: a square erosion is a horizontal one then a vertical one.
+    for along_rows in (True, False):
+        outer, inner = (height, width) if along_rows else (width, height)
+        step = 1 if along_rows else width
+        out = [False] * len(mask)
+        for major in range(outer):
+            base = major * width if along_rows else major
+            for minor in range(inner):
+                if minor < radius or minor >= inner - radius:
+                    continue  # the frame cannot be an interior
+                out[base + minor * step] = all(
+                    mask[base + (minor + offset) * step]
+                    for offset in range(-radius, radius + 1)
+                )
+        mask = out
+    return any(mask)
+
+
+def _extra_entry_earned_its_thread(
+    quantisation: Quantisation, background: int, radius: int
+) -> bool:
+    """Did asking for one more colour buy artwork, or the edge between two?
+
+    **The finding that put this here, measured on the corpus.** Handing the
+    quantiser an extra entry does not hand it to the drawing. On **11 of the 18
+    images where a background is isolated at all** it goes to the antialiasing
+    ramp between two real colours — ``#8c8c8c`` at 0.25% of ``logo-two-colour``,
+    ``#c5c5c5`` at 0.02% of ``monogram`` — because a filtered hard edge really
+    is a distinct colour, just not one anybody chose. On the other seven it goes
+    where it was meant to: ``logo-five-colour`` gets ``#c8102e`` at 11.7%, a
+    fourth colour of the logo that the old budget could not afford.
+
+    Note which way the split falls. The images that *earn* it are the ones with
+    real colour in them — the photographs, the gradients, ``logo-five-colour``.
+    The ones that do not are flat artwork, where the profile's budget was
+    already enough and the only thing left to spend a thread on is an edge.
+
+    So the extra thread is granted on the same test the shop already applies to
+    everything else: **can the machine sew it.** A ramp is one pixel wide by
+    construction and vanishes under an erosion at the profile's own minimum
+    feature; a colour of the artwork has an inside. No new number — ``radius``
+    is the profile's ``stroke.min_width`` in this attempt's pixels, the same
+    kernel B1 sizes the working resolution around.
+
+    Rejecting it is not the same as keeping the background. The caller
+    quantises again at the plain budget and still leaves the paper unstitched,
+    so a two-ink drawing at a three-thread budget comes back as two inks and
+    bare fabric — which is what it is, rather than two inks, bare fabric and a
+    grey hairline tracing every edge in the design.
+    """
+    return all(
+        _survives_the_needle(quantisation, index, radius)
+        for index in range(quantisation.colors)
+        if index != background and quantisation.area(index) > 0
+    )
+
+
+def plan_palette(
+    cleaned: Raster, recipe: Recipe, found: Optional[Background]
+) -> Tuple[Quantisation, Optional[int], Optional[Stage]]:
+    """Quantise, and decide whether one of the entries is paper to leave out.
+
+    B8's whole decision in one place, because it is three decisions that have to
+    agree: the budget counts threads, the paper is extra, and the extra entry is
+    only kept if it was earned. Four ways out, and the last three all end at the
+    same document the image got before B8 — with or without its paper:
+
+    - **the paper isolated and the extra thread spent on the drawing.** The
+      ``wanted + 1`` palette is kept and one entry is named as the background.
+    - **the extra thread was not earned** (:func:`_extra_entry_earned_its_thread`)
+      — it bought the antialiasing ramp between two real colours rather than a
+      colour of the artwork. It is handed back and the image quantised at the
+      plain budget, with the paper still left unstitched.
+    - **...and the plain budget then does not isolate the paper.** Rare, and it
+      has to be said rather than assumed: a different budget is a different
+      clustering, so the guards in :func:`background_entry` get a second and
+      independent chance to refuse.
+    - **the paper was never isolated at all**, or there is none to find.
+
+    Only the first costs a second quantisation, and only on the path that was
+    going to spend one anyway. The stage note is the outcome in words; ``None``
+    means the pipeline was not asked to look, so there is nothing to report.
+    """
+    wanted = recipe.colors
+    if not recipe.drop_background:
+        return quantise_lab(cleaned, wanted), None, None
+
+    if found is None:
+        return (
+            quantise_lab(cleaned, wanted),
+            None,
+            Stage(
+                "background",
+                "no paper to leave unstitched, so the whole colour budget is "
+                "spent the way it always was",
+            ),
+        )
+
+    quantisation = quantise_lab(cleaned, wanted + 1)
+    background = background_entry(quantisation, found)
+
+    if background is None:
+        return (
+            quantise_lab(cleaned, wanted),
+            None,
+            Stage(
+                "background",
+                f"asked for {wanted + 1} colours so the paper could be left "
+                "unstitched, but no single entry is cleanly the paper — "
+                f"quantised at {wanted} and the background is stitched",
+            ),
+        )
+
+    if not _extra_entry_earned_its_thread(quantisation, background, recipe.radius):
+        quantisation = quantise_lab(cleaned, wanted)
+        background = background_entry(quantisation, found)
+        gave_back = (
+            f"asked for {wanted + 1} colours, but the extra one bought the edge "
+            "between two others rather than a colour of the artwork, so it was "
+            "given back"
+        )
+        if background is None:
+            return (
+                quantisation,
+                None,
+                Stage(
+                    "background",
+                    f"{gave_back} — quantised at {wanted}, where no single entry "
+                    "is cleanly the paper, so the background is stitched",
+                ),
+            )
+        return (
+            quantisation,
+            background,
+            Stage(
+                "background",
+                f"{gave_back} — quantised at {wanted} and left "
+                + _hex(quantisation.palette[background])
+                + " unstitched",
+            ),
+        )
+
+    return (
+        quantisation,
+        background,
+        Stage(
+            "background",
+            f"asked for {wanted + 1} colours and left "
+            + _hex(quantisation.palette[background])
+            + f" unstitched, so all {wanted} thread(s) go to the artwork",
+        ),
+    )
 
 
 def run(raster: Raster, recipe: Recipe) -> Preprocessed:
-    """The whole pipeline: an image in, labels ready to trace out."""
-    cleaned, stages = clean(raster, recipe)
+    """The whole pipeline: an image in, labels ready to trace out.
 
-    quantisation = quantise_lab(cleaned, recipe.colors)
+    **B8: the colour budget is the artwork's, and the paper is extra.** A shop's
+    ``color.max_count`` is a count of threads, and nobody loads the garment onto
+    the machine — so when the paper is going to be left unstitched the quantiser
+    is asked for ``colors + 1`` and the extra entry is the one that goes. The
+    alternative reading spends a thread on fabric, and does it unevenly: the
+    same artwork exported with an alpha channel would get three inks where the
+    scan of it got two, which is the tool grading the file format rather than
+    the design.
+
+    The ``+1`` is **conditional on actually dropping something**, so it is asked
+    for, checked, and given back when either check fails: an image whose paper
+    the quantiser will not isolate cleanly, or one where the extra entry buys an
+    edge rather than a colour, is quantised again at the plain budget. That costs
+    a second quantisation on the path that was going to be disappointing anyway,
+    and it is the only way to avoid shipping a document with one colour more than
+    the profile allows. :func:`plan_palette` holds that decision.
+    """
+    cleaned, stages, found = clean(raster, recipe)
+
+    quantisation, background, said = plan_palette(cleaned, recipe, found)
+    if said is not None:
+        stages.append(said)
+
     stages.append(
         Stage("quantise", f"reduced to {quantisation.colors} colour(s) in Lab space")
     )
@@ -753,4 +1061,9 @@ def run(raster: Raster, recipe: Recipe) -> Preprocessed:
             Stage("despeckle", "off: the filter left no specks to remove")
         )
 
-    return Preprocessed(cleaned=cleaned, quantisation=quantisation, stages=stages)
+    return Preprocessed(
+        cleaned=cleaned,
+        quantisation=quantisation,
+        stages=stages,
+        background=background,
+    )

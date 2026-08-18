@@ -60,6 +60,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import cleanup as b5
 from .bench import MAX_WORK_SIDE, canvas_and_stroke, color_budget, scale_for
+from .document import parse_svg
 from .findings import Finding, Report
 from .preprocess import Preprocessed, Recipe
 from .preprocess import run as preprocess_run
@@ -110,8 +111,11 @@ class Settings:
 
     #: Longest side of the finished design, in millimetres.
     canvas_mm: float
-    #: Colour budget handed to the quantiser — the profile's ``color.max_count``
-    #: until a retry lowers it.
+    #: Colour budget for the **artwork** — the profile's ``color.max_count``
+    #: until a retry lowers it. B8 made this threads rather than palette
+    #: entries: with :attr:`drop_background` set the quantiser is asked for one
+    #: more than this and the extra one is the paper, so a design on white gets
+    #: the same number of inks as the same design with an alpha channel.
     colors: int
     #: Resolution the image is traced at, in pixels on its longest side.
     work_side: int
@@ -122,6 +126,10 @@ class Settings:
     #: (B4). Not a retry knob: it is what stops the layers showing seams, and
     #: no failure this loop can see is answered by turning it off.
     overlap: int = DEFAULT_OVERLAP
+    #: B8: leave the paper unstitched, so the garment is the background. Not a
+    #: retry knob either — no failure the loop can see is answered by stitching
+    #: the background back in, and turning it off costs a thread.
+    drop_background: bool = True
 
     @property
     def canvas_cm(self) -> float:
@@ -162,6 +170,9 @@ class Attempt:
     seconds: float = 0.0
     #: What the loop decided to do next, or ``None`` when it stopped here.
     adjustment: Optional[Adjustment] = None
+    #: Anything the tracer thought worth saying — a colour left unstitched, or a
+    #: colour tracer explaining that it could not leave one out.
+    trace_notes: List[str] = field(default_factory=list)
 
     @property
     def passes(self) -> bool:
@@ -202,6 +213,17 @@ class Attempt:
             if finding.rule_id not in seen:
                 seen.append(finding.rule_id)
         return seen
+
+    @property
+    def inks(self) -> int:
+        """Colours actually in the document, which is threads on the machine.
+
+        Not ``settings.colors``: that is the *budget*, and since B8 a run can
+        come in under it — a one-colour monogram on paper is one ink and bare
+        fabric, and reporting "3 colour(s)" because the profile allows three
+        reads as a claim about the file rather than about the permission.
+        """
+        return len(parse_svg(self.svg).colors())
 
     @property
     def shapes(self) -> int:
@@ -296,9 +318,11 @@ class Conversion:
         if self.upscaled:
             lines.append(f"convert: {self.upscaled}")
         for index, attempt in enumerate(self.attempts, start=1):
-            for said_line in [
-                f"{stage.name}: {stage.says}" for stage in attempt.prepared.stages
-            ] + attempt.cleanup.notes():
+            for said_line in (
+                [f"{stage.name}: {stage.says}" for stage in attempt.prepared.stages]
+                + [f"trace: {note}" for note in attempt.trace_notes]
+                + attempt.cleanup.notes()
+            ):
                 if said_line in said:
                     continue
                 said.add(said_line)
@@ -674,10 +698,20 @@ def one_attempt(
     radius = kernel_radius(profile, settings)
     prepared = preprocess_run(
         work,
-        Recipe(colors=settings.colors, radius=radius, speck_area=settings.speck_area),
+        Recipe(
+            colors=settings.colors,
+            radius=radius,
+            speck_area=settings.speck_area,
+            drop_background=settings.drop_background,
+        ),
     )
     traced = backend.trace(
-        prepared.quantisation, canvas_mm=settings.canvas_mm, overlap=settings.overlap
+        prepared.quantisation,
+        canvas_mm=settings.canvas_mm,
+        overlap=settings.overlap,
+        # Empty unless the pipeline both looked for a background and found one
+        # it was willing to drop, so this is the no-background path unchanged.
+        skip=() if prepared.background is None else (prepared.background,),
     )
     cleaned = b5.clean(traced.svg, profile)
     return Attempt(
@@ -687,6 +721,7 @@ def one_attempt(
         cleanup=cleaned,
         prepared=prepared,
         seconds=time.monotonic() - started,
+        trace_notes=list(traced.notes),
     )
 
 
@@ -727,6 +762,7 @@ def convert(
     tries: int = DEFAULT_TRIES,
     name: str = "",
     settings: Optional[Settings] = None,
+    drop_background: bool = True,
 ) -> Conversion:
     """Turn an image into an SVG this profile accepts, or explain why not.
 
@@ -734,6 +770,11 @@ def convert(
     optional capability in the project, a missing one is fatal here rather than
     a measurement you don't get: there is no degraded conversion, so it raises
     with the install hint instead of returning half an answer.
+
+    ``drop_background=False`` stitches the paper as a colour, which is what
+    every conversion did before B8. It is an escape hatch rather than a knob:
+    the loop never turns it, because no failure it can see is answered by
+    spending a thread on fabric.
     """
     backend = backend or default_backend()
     if backend is None:
@@ -746,7 +787,7 @@ def convert(
 
     source_side = max(source.width, source.height)
     start, note = initial_settings(profile, source_side)
-    current = settings or start
+    current = replace(settings or start, drop_background=drop_background)
     if source_side >= current.work_side:  # caller-supplied settings may not need it
         note = ""
     # Once, outside the loop: no knob changes the resolution, and re-deriving
@@ -795,6 +836,7 @@ def convert_file(
     profile: Profile,
     backend: Optional[Backend] = None,
     tries: int = DEFAULT_TRIES,
+    drop_background: bool = True,
 ) -> Conversion:
     """:func:`convert`, from a file on disk."""
     path = Path(path)
@@ -802,7 +844,14 @@ def convert_file(
         source = load_image(path)
     except RasterError as exc:
         raise ConvertError(f"{path}: {exc}") from exc
-    return convert(source, profile, backend=backend, tries=tries, name=str(path))
+    return convert(
+        source,
+        profile,
+        backend=backend,
+        tries=tries,
+        name=str(path),
+        drop_background=drop_background,
+    )
 
 
 # ------------------------------------------------------------- rendering
@@ -862,9 +911,15 @@ def render_conversion(
     if conversion.passes:
         lines.append(
             f"✅ converted at {best.settings.canvas_cm:.1f} cm: "
-            f"{best.settings.colors} colour(s), {best.shapes} shape(s), "
+            f"{best.inks} ink(s), {best.shapes} shape(s), "
             f"{best.nodes} node(s), {conversion.tries} attempt(s)"
         )
+        # B8: the paper is the loudest thing this run did to the artwork and the
+        # one thing a preview on a white page cannot show, so it is said without
+        # -v. Same reasoning as A6's skip list: a run accounts for what it left
+        # out as plainly as for what it did.
+        for note in best.trace_notes:
+            lines.append(f"ℹ️  {note}")
         if best.cut_detail:
             lines.append(
                 "ℹ️  detail finer than the needle was cut out of the artwork to get "

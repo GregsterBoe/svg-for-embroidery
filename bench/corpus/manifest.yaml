@@ -86,6 +86,12 @@ images:
     category: photo
     expect: hopeless
     note: "high-frequency colour everywhere"
+  - name: paper-minority
+    file: paper-minority.png
+    profile: embroidery-basic
+    category: logo
+    expect: good
+    note: "two bands to the edges: the ground is only the four corners"
   - name: alpha-logo
     file: alpha-logo.png
     profile: embroidery-basic

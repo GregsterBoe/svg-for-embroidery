@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the B1 benchmark corpus.
 
-Twenty images spanning the range the roadmap names — flat logos, line art,
+Twenty-one images spanning the range the roadmap names — flat logos, line art,
 scanned drawings, photos with backgrounds, transparent PNGs, gradients and
 low-resolution junk — generated rather than collected, for three reasons:
 
@@ -334,6 +334,28 @@ def alpha_soft() -> Canvas:
     return canvas.each(paint)
 
 
+def paper_minority() -> Canvas:
+    """B8's awkward case: the ground is neither the largest area nor the bottom layer.
+
+    Every other fixture has its paper as the biggest thing in the picture, so
+    the background sorts to the bottom of the stitching order and dropping it is
+    free — nothing was ever grown underneath it. Here two bands cross and reach
+    all four edges, leaving the paper as four corner squares: **blue 45%, paper
+    30%, red 25%**, so the paper is stitched second and the red beneath it is
+    spread under it by B4's trap.
+
+    That is the one arrangement where dropping a layer can show: the pixels the
+    red was grown into are about to become fabric, and a red hairline round the
+    hole is what a naive drop leaves behind. The proportions are the fixture —
+    keep the paper off both ends of the area order or the image stops testing
+    anything.
+    """
+    canvas = Canvas()
+    canvas.rect(0, 70, SIZE, 186, RED)      # a band to both side edges
+    canvas.rect(70, 0, 186, SIZE, BLUE)     # and one to the top and bottom
+    return canvas
+
+
 def gradient_linear() -> Canvas:
     def paint(x: int, y: int) -> RGBA:
         t = x / (SIZE - 1)
@@ -410,6 +432,8 @@ FIXTURES = [
      "sky gradient over textured ground"),
     ("photo-busy", photo_busy, "embroidery-basic", "photo", "hopeless",
      "high-frequency colour everywhere"),
+    ("paper-minority", paper_minority, "embroidery-basic", "logo", "good",
+     "two bands to the edges: the ground is only the four corners"),
     ("alpha-logo", alpha_logo, "embroidery-basic", "alpha", "good",
      "flat colours on a transparent background"),
     ("alpha-soft", alpha_soft, "embroidery-basic", "alpha", "marginal",

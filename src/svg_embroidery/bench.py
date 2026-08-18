@@ -58,7 +58,7 @@ from .tracer import DEFAULT_OVERLAP
 from .tracer import INSTALL_HINT as TRACER_INSTALL_HINT
 from .tracer import TracerError, default_backend, measure_svg
 from .triage import Band, assess
-from .visual import Raster, compare_rasters, render, show_through
+from .visual import Raster, compare_rasters, composite_behind, render, show_through
 
 #: Where the corpus lives when nothing else is said. Kept out of ``tests/`` on
 #: purpose: it is a measuring instrument that happens to be checked in, not a
@@ -413,6 +413,9 @@ def convert_row(
     profile: Profile,
     backend: TracerBackend,
     tries: Optional[int] = None,
+    raw: Optional[Raster] = None,
+    radius: int = 1,
+    preprocess: bool = False,
 ) -> None:
     """Fill in the trace columns from B6's loop rather than from a single trace.
 
@@ -422,10 +425,19 @@ def convert_row(
     ``passes`` describe the document a shop would actually be sent, and the new
     ``tries`` column says what it cost to get there.
 
-    ``fit`` is still measured against the row's own quantisation — the image as
-    this profile's colour budget allows it — so a retry that dropped a colour
+    ``fit`` is still measured against a quantisation of the *source* — the image
+    as this profile's colour budget allows it — so a retry that dropped a colour
     is visible as the concession it is, rather than being graded against its
     own reduced palette and scoring well for it.
+
+    **B8 moved what that budget is, and the reference had to move with it.** A
+    conversion that leaves the paper unstitched is allowed ``k`` threads *plus*
+    the fabric, so grading it against the source at ``k`` colours total compares
+    two different palettes and reports the difference as tracing error: measured,
+    ``photo-portrait`` 0.027 → 0.802 and ``gradient-radial`` 0.022 → 0.877 about
+    conversions that had not got worse at all. The reference is re-quantised at
+    ``k + 1`` exactly when the conversion dropped something, which is the same
+    arithmetic the pipeline did and the same reason for it.
     """
     from .convert import ConvertError, convert
 
@@ -452,8 +464,93 @@ def convert_row(
             "to compare the result against the source"
         )
         return
-    row.fit = compare_rasters(reduced.raster(), shot).ratio
-    row.gaps = show_through(shot).area
+    # B8: the document has a hole where its source has paper, and both columns
+    # have to be told or neither answers its question any more. `gaps` drops the
+    # region; `fit` re-quantises its reference at the budget the conversion was
+    # actually allowed, and then puts that reference's own ground behind the
+    # hole — because a design sewn onto fabric that colour *is* the picture.
+    bare = unstitched_mask(conversion.best, shot)
+    reference = (
+        reduced
+        if bare is None
+        else fit_reference(raw, reduced, row.k, radius, preprocess)
+    ).raster()
+    on_fabric = shot if bare is None else composite_behind(shot, reference, bare)
+    row.fit = compare_rasters(reference, on_fabric).ratio
+    row.gaps = show_through(shot, ignore=bare).area
+
+
+def fit_reference(
+    raw: Optional[Raster],
+    reduced: Quantisation,
+    budget: int,
+    radius: int,
+    preprocess: bool,
+) -> Quantisation:
+    """The source at ``budget + 1`` colours — ``k`` threads and the fabric (B8).
+
+    Built exactly the way ``reduced`` was, one entry wider: through the
+    preprocessing pipeline where the row went through it, and by plain median
+    cut where it did not. Independent of the conversion — it is the measuring
+    path's own working image at the measuring path's own resolution. What it is
+    *not* is the conversion's own palette, which would grade a document against
+    itself and score a retry that dropped a colour as a good fit for having
+    done so.
+
+    Falls back to ``reduced`` when the caller has no working image to hand,
+    which is the pre-B8 signature.
+    """
+    if raw is None:
+        return reduced
+    if not preprocess:
+        return quantise(raw, budget + 1)
+    from .preprocess import Recipe
+    from .preprocess import run as preprocess_run
+
+    return preprocess_run(raw, Recipe(colors=budget + 1, radius=radius)).quantisation
+
+
+def unstitched_mask(attempt, shot: Raster) -> Optional[List[bool]]:
+    """Where the document is bare on purpose (B8), in the render's own pixels.
+
+    ``None`` when nothing was dropped, which is every conversion before B8 and
+    every image with no paper to find — so `gaps` is computed exactly as it was.
+
+    Two things happen here and both matter. The mask is **resampled** to the
+    render, because the attempt's working resolution and the resolution the
+    benchmark renders at are chosen by different calls and need not agree. And
+    it is **grown by one pixel**, for the same reason :func:`show_through` drops
+    a frame from the edge of the canvas: the outermost row of any shape is
+    half-covered by its own boundary, and dropping the background gives the
+    artwork a new outer boundary in the middle of the picture. That ring is the
+    edge of the drawing, not a seam between two layers, and counting it would
+    put a floor under the column that no fix could reach.
+    """
+    index = attempt.prepared.background
+    if index is None:
+        return None
+    quantisation = attempt.prepared.quantisation
+    width, height = shot.width, shot.height
+    bare = [False] * (width * height)
+    for y in range(height):
+        source_row = (y * quantisation.height // height) * quantisation.width
+        target = y * width
+        for x in range(width):
+            source = source_row + x * quantisation.width // width
+            bare[target + x] = quantisation.indices[source] == index
+
+    grown = list(bare)
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            if not bare[row + x]:
+                continue
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width:
+                        grown[ny * width + nx] = True
+    return grown
 
 
 def measure(
@@ -531,7 +628,7 @@ def measure_raster(
     row.alpha = has_alpha(source)
 
     scale = scale_for(profile, max(source.width, source.height), work_side)
-    work = downsample(source, scale.work_side)
+    work = raw = downsample(source, scale.work_side)
     row.k = color_budget(profile)
 
     reduced: Optional[Quantisation] = None
@@ -570,7 +667,12 @@ def measure_raster(
         # From the source rather than from `work`: the loop does its own
         # preprocessing, at its own settings, and may enlarge a small image
         # first — which is the one thing measuring must not do.
-        convert_row(row, source, reduced, profile, backend, tries=tries)
+        convert_row(
+            row, source, reduced, profile, backend, tries=tries,
+            # B8's fit reference is built from the same working image, one entry
+            # wider — see fit_reference.
+            raw=raw, radius=scale.radius, preprocess=preprocess,
+        )
     elif backend is not None:
         trace_row(
             row,

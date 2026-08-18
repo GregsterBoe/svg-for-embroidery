@@ -231,6 +231,18 @@ input[type=file] { display: none; }
 .ba figcaption { font-size: .74rem; text-transform: uppercase; letter-spacing: .04em;
                  color: var(--muted); text-align: center; margin-bottom: 5px; }
 .ba img { width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
+/* B8: a converted document has no background unless something paints one, and
+   on white that is invisible — the page composites onto white exactly as
+   visual.py does, so a hole and a white fill render identically. The chequer is
+   how the fabric shows: what you see through it is what the garment will be. */
+.ba img.fabric, .preview img.fabric {
+  background-color: #e9e5dd;
+  background-image:
+    linear-gradient(45deg, #d3ccc0 25%, transparent 25%, transparent 75%, #d3ccc0 75%),
+    linear-gradient(45deg, #d3ccc0 25%, transparent 25%, transparent 75%, #d3ccc0 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
 .ba select { padding: 6px 8px; font-size: .8rem; margin-bottom: 6px; }
 .stack > button { margin-top: 8px; }
 .ask { border: 1px solid var(--accent); border-radius: 12px; padding: 14px;
@@ -930,11 +942,11 @@ function renderConvert() {
     </figure>
     <figure>
       <figcaption>try ${image.shown + 1} · ${escapeHtml(a.settings.describe)}</figcaption>
-      <img id="ba-right" alt="right">
+      <img id="ba-right" class="fabric" alt="right">
     </figure>
   </div>
   <div class="note">${a.shapes} shape(s), ${a.nodes} node(s) —
-    what the machine has to sew.</div></div>`;
+    what the machine has to sew.</div>${unstitchedHtml(a)}</div>`;
 
   html += '<div class="card"><h2>What the ruleset says about it</h2>'
         + findingsHtml(a.report) + '</div>';
@@ -985,11 +997,25 @@ function paneOptions(selected) {
   return html;
 }
 
+function unstitchedHtml(a) {
+  // B8: the hole is the point, so it is said in words as well as drawn. The
+  // chequer behind the preview is the fabric — without it a dropped background
+  // and a white one look identical, which is the whole trap this step is in.
+  if (!a.unstitched) return '';
+  const share = (a.unstitched.share * 100).toFixed(0);
+  return `<div class="note">🧵 ${escapeHtml(a.unstitched.color)} is the ground, not a
+    thread: ${share}% of the design is left unstitched, so the garment shows through
+    there. The chequer behind the preview is that fabric. Convert with
+    <code>--keep-background</code> to stitch it instead, at the cost of one colour.</div>`;
+}
+
 function showLeft() {
   const which = image.left;
-  $('ba-left').src = which === 'source'
-    ? image.url
-    : dataUri(image.attempts[parseInt(which, 10)].svg);
+  const source = which === 'source';
+  $('ba-left').src = source ? image.url : dataUri(image.attempts[parseInt(which, 10)].svg);
+  // The source is a photograph of something; only a converted document has a
+  // hole in it, so only that pane gets the fabric behind it.
+  $('ba-left').classList.toggle('fabric', !source);
 }
 
 // ---------------------------------------------------------------- shared
@@ -1447,6 +1473,7 @@ def _attempt_payload(
         "seconds": round(attempt.seconds, 2),
         "report": attempt.report.to_dict(),
         "notes": _attempt_notes(attempt, upscaled if index == 0 else ""),
+        "unstitched": _unstitched(attempt),
         "next": next_up,
     }
 
@@ -1455,8 +1482,29 @@ def _attempt_notes(attempt: Attempt, upscaled: str) -> List[str]:
     """What every stage said about this attempt, in the words it said it in."""
     notes = [upscaled] if upscaled else []
     notes.extend(f"{stage.name}: {stage.says}" for stage in attempt.prepared.stages)
+    notes.extend(f"trace: {note}" for note in attempt.trace_notes)
     notes.extend(attempt.cleanup.notes())
     return notes
+
+
+def _unstitched(attempt: Attempt) -> Optional[Dict[str, Any]]:
+    """B8's dropped background, for a page that has to make a hole visible.
+
+    The CLI can print "left unstitched" and be understood. A page cannot: it
+    renders the document onto whatever is behind it, so a hole where the paper
+    was looks exactly like white paint — the same trap ``visual.py`` has, where
+    compositing onto white before comparing makes a dropped background score
+    zero difference. So the page is told which colour left and how much of the
+    picture it was, and previews the result on a ground that is not white.
+    """
+    index = attempt.prepared.background
+    if index is None:
+        return None
+    quantisation = attempt.prepared.quantisation
+    return {
+        "color": "#{:02x}{:02x}{:02x}".format(*quantisation.palette[index]),
+        "share": round(quantisation.area(index), 4),
+    }
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, verbose: bool = False) -> None:

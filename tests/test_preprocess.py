@@ -8,10 +8,12 @@ from svg_embroidery.preprocess import (
     LOW_CONTRAST,
     MIN_SEPARATION,
     Recipe,
+    background_entry,
     clean,
     contrast_span,
     denoise,
     despeckle,
+    find_background,
     flatten_background,
     noise_sigma,
     normalise_contrast,
@@ -19,7 +21,14 @@ from svg_embroidery.preprocess import (
     upscale,
 )
 from svg_embroidery.preprocess import run as preprocess
-from svg_embroidery.raster import edge_density, flat_ratio, quantise, rgb_pixels, thin_ratio
+from svg_embroidery.raster import (
+    Quantisation,
+    edge_density,
+    flat_ratio,
+    quantise,
+    rgb_pixels,
+    thin_ratio,
+)
 from svg_embroidery.visual import Raster, compare_rasters
 
 from test_bench import BLACK, RED, WHITE, image
@@ -286,6 +295,157 @@ def test_despeckling_is_off_by_default():
     assert any("off" in stage.says for stage in result.stages if stage.name == "despeckle")
 
 
+# -- B8: the paper is not a thread -------------------------------------------
+
+def two_inks_on_paper(width=64, height=64):
+    """A red bar and a black bar on white — two inks, and a ground to drop."""
+    def paint(x, y):
+        if 8 <= x < 24:
+            return RED
+        if 40 <= x < 56:
+            return BLACK
+        return WHITE
+
+    return image(width, height, paint)
+
+
+def test_the_budget_counts_threads_so_the_quantiser_is_asked_for_one_more():
+    """B8's decision, at the only place it is taken.
+
+    Three inks on paper at a budget of three: under the old reading the paper
+    ate one of them and the third ink was merged away. The extra entry here is
+    a real colour of the artwork, so it is earned and kept.
+    """
+    def paint(x, y):
+        if 4 <= x < 18:
+            return RED
+        if 22 <= x < 36:
+            return BLACK
+        if 40 <= x < 54:
+            return (32, 74, 160, 255)
+        return WHITE
+
+    result = preprocess(image(64, 64, paint), Recipe(colors=3, drop_background=True))
+
+    assert result.quantisation.colors == 4
+    assert result.background is not None
+    # The paper is the entry that leaves, and all three threads go to the inks.
+    assert result.quantisation.palette[result.background] == WHITE[:3]
+    inks = {
+        result.quantisation.palette[index]
+        for index in range(result.quantisation.colors)
+        if index != result.background
+    }
+    assert len(inks) == 3 and WHITE[:3] not in inks
+
+
+def test_an_extra_entry_that_buys_an_edge_is_handed_back():
+    """The measurement that put :func:`_extra_entry_earned_its_thread` there.
+
+    Handing the quantiser a spare entry does not hand it to the drawing: on a
+    two-ink image it goes to the antialiasing ramp along the boundary — one
+    pixel wide by construction, and a grey hairline tracing every edge in the
+    design is not what a freed thread was for. Here the ramp is drawn rather
+    than filtered in, so the fixture can be read: ink, one column of ramp,
+    paper. The paper still goes; only the extra entry comes back.
+    """
+    def paint(x, y):
+        if 8 <= x < 28:
+            return BLACK
+        if x == 28:
+            return (140, 140, 140, 255)
+        return WHITE
+
+    ramped = image(64, 64, paint)
+    recipe = Recipe(colors=2, denoise=False, drop_background=True)
+
+    # The spare entry is genuinely available: at three, the ramp is its own.
+    assert quantise_lab(ramped, 3).colors == 3
+    result = preprocess(ramped, recipe)
+
+    assert result.quantisation.colors == 2, "the spare entry was given back"
+    assert result.background is not None
+    assert result.quantisation.palette[result.background] == WHITE[:3]
+    said = next(stage.says for stage in result.stages if "given back" in stage.says)
+    assert "unstitched" in said, "the paper still goes; only the extra entry came back"
+
+
+def test_an_image_with_no_paper_to_drop_is_converted_exactly_as_it_was_before_b8():
+    """The gate that matters: B8 is a new branch, and the old branch must not move."""
+    busy = image(64, 64, lambda x, y: (x * 4 % 256, y * 4 % 256, (x + y) % 256, 255))
+    before = preprocess(busy, Recipe(colors=3))
+    after = preprocess(busy, Recipe(colors=3, drop_background=True))
+
+    assert after.background is None
+    assert after.quantisation.palette == before.quantisation.palette
+    assert after.quantisation.indices == before.quantisation.indices
+    assert any("the background is stitched" in stage.says for stage in after.stages)
+
+
+def test_an_image_the_corners_find_no_paper_in_says_so_rather_than_guessing():
+    """A fill that reaches everything found the picture, so there is nothing to drop."""
+    result = preprocess(image(64, 64, lambda x, y: WHITE), Recipe(colors=3, drop_background=True))
+
+    assert result.background is None
+    assert any(
+        "no paper to leave unstitched" in stage.says for stage in result.stages
+    )
+
+
+def test_paper_split_across_two_entries_is_left_stitched():
+    """First guard: below :data:`BACKGROUND_COHERENCE` nothing is dropped.
+
+    Dropping one of two entries the paper was split across leaves the rest
+    stitched — in a colour chosen to blend with fabric that is no longer there,
+    which is worse than stitching all of it.
+    """
+    quantisation = quantise_lab(two_inks_on_paper(), 3)
+    found = find_background(two_inks_on_paper())
+    assert found is not None
+
+    # Split the paper down the middle, so no single entry holds enough of it.
+    torn = Quantisation(
+        width=quantisation.width,
+        height=quantisation.height,
+        palette=list(quantisation.palette) + [(254, 254, 254)],
+        indices=[
+            quantisation.colors - 1 + 1 if (found.mask[i] and i % 2) else value
+            for i, value in enumerate(quantisation.indices)
+        ],
+    )
+    assert background_entry(torn, found) is None
+
+
+def test_an_entry_shared_with_artwork_is_left_stitched():
+    """Second guard: below :data:`BACKGROUND_PURITY` the drawing goes with it.
+
+    A margin of paper round a pale ink, quantised down to a single entry: the
+    paper is all of it, but it is only 44% *of* it, so dropping the entry would
+    take the drawing with the fabric.
+    """
+    def paint(x, y):
+        edge = x < 8 or y < 8 or x >= 56 or y >= 56
+        return WHITE if edge else (200, 200, 200, 255)
+
+    raster = image(64, 64, paint)
+    found = find_background(raster)
+    assert found is not None and found.share < 0.5
+
+    quantisation = quantise_lab(raster, 1)  # one entry, so it holds everything
+    assert background_entry(quantisation, found) is None
+
+
+def test_the_measuring_path_keeps_grading_the_image_it_was_handed():
+    """``drop_background`` is off by default, and B1 never turns it on.
+
+    A metric describes the image somebody brought; leaving a colour out of the
+    document is a decision the conversion takes, so a bench row taken with it
+    would be grading a different picture.
+    """
+    assert Recipe(colors=3).drop_background is False
+    assert preprocess(two_inks_on_paper(), Recipe(colors=3)).background is None
+
+
 # -- the pipeline ------------------------------------------------------------
 
 def test_the_pipeline_reports_what_each_stage_did():
@@ -309,7 +469,7 @@ def test_the_grain_is_measured_before_the_background_is_flattened():
     assert noise_sigma(noisy) > noise_sigma(flattened)
 
     # clean() takes its measurement first, so the filter is sized for the grain.
-    cleaned, stages = clean(noisy, Recipe(colors=3))
+    cleaned, stages, _ = clean(noisy, Recipe(colors=3))
     sigma = next(stage for stage in stages if stage.name == "denoise").says
     assert sigma != "bilateral filter at sigma 6", "sigma 6 is the floor: nothing was seen"
 

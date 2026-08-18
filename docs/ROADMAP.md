@@ -1760,10 +1760,138 @@ on a machine that can, and let the phone be the client.
 > never produces a rule that asks today, which is why this is a note rather than
 > a step; a shop profile with an unusual rule would make it one.
 
-### B8. The background is not a colour · ⬜ NOT STARTED
+### B8. The background is not a colour · ✅ CLEARED
 
 **Added after B7, from use** — the same way A7 was. Every conversion of artwork
 on paper spends a thread on the paper, and nobody stitches the garment.
+
+**Gate met.** `svgemb bench --convert`, against the same corpus converted with
+`--keep-background`:
+
+| | background stitched | left unstitched |
+| --- | --- | --- |
+| subpaths over the corpus | 622 | **573** |
+| nodes | 14254 | **13465** |
+| `fit`, mean | 0.065 | **0.062** |
+| `gaps`, mean | 0.000 | 0.000 |
+| images a human called convertible that convert | 15/15 | 15/15 |
+| ...at `embroidery-strict` | 14/15 | 14/15 |
+| attempts it took to get there, at `embroidery-strict` | 30 | 35 |
+
+**Read the last three rows before the first two.** B8 converts nothing that did
+not convert before, and at `embroidery-strict` it costs five extra attempts —
+`logo-five-colour` 1 → 3 and `photo-landscape` 1 → 4, because a design with one
+more ink in it has more to fail on. `line-art-thin` still does not pass at
+strict and this step was never going to make it. **The win is what gets
+stitched, not what passes**: one less layer, 8% fewer subpaths, 6% fewer nodes,
+and the thread that was going into the garment going into the drawing instead.
+
+Every gate item, in the order the plan set them:
+
+- **one fewer layer, and no fill in the paper colour.** `monogram` and
+  `line-art-thick` go from two colours to **one ink on bare fabric**;
+  `logo-two-colour`, `scan-clean`, `alpha-logo` and `paper-minority` each drop
+  one. Checked by rendering over a non-white ground and finding that ground
+  where the paper was, not by reading the palette.
+- **`color.max_count` at 3 sees 3 inks, not 2.** `logo-five-colour` is the image
+  that shows it: `asked for 4 colours and left #ffffff unstitched, so all 3
+  thread(s) go to the artwork`, and the checker then counts three.
+- **an image with no paper converts as it did before.** The palette, the labels
+  and the `gaps` computation are identical, and `unstitched_mask` returns
+  `None` so the old code path is the one that runs.
+- **a fixture whose paper is not the largest area drops it with no fringe.**
+  `bench/make_corpus.py` grew `paper-minority` — two bands to the edges, blue
+  45%, paper 30%, red 25%, so the ground sorts to the *middle* of the stitching
+  order. Measured: 0 painted paper pixels with the exclusion in
+  `trapped_claims`, **70** without it, against a hole rim of 136.
+- **`gaps` reports the seam residue, not the background.** 0.000 on a document
+  that is 30% deliberate fabric, where the naive reading is 0.29.
+
+One item in the plan turned out not to need doing. *"The retry loop is off by
+one until it is told"* — `_fewer_colours` stops at `MIN_COLORS`, and the worry
+was that a budget silently including paper reaches a silhouette one step early.
+It does not need a change: `Settings.colors` **is** the ink count now, so the
+sentence the loop already prints is true as written and the floor is in the
+right place. The plan named a consequence of the decision, not a second edit.
+
+**The extra thread has to be earned, and mostly it is not.** This was the
+finding that cost the most and is the reason `_extra_entry_earned_its_thread`
+exists. Handing the quantiser a spare entry does not hand it to the drawing: on
+**11 of the 18 corpus images where a background is isolated at all** it goes to
+the **antialiasing ramp between two real colours** — `#8c8c8c` at 0.25% of
+`logo-two-colour`, `#c5c5c5` at 0.02% of `monogram` — because a filtered hard
+edge really is a distinct colour, just not one anybody chose. The split falls
+the way it should: the seven that earn it are the ones with real colour in them
+— the photographs, the gradients, `logo-five-colour` — while flat artwork had
+enough budget already and the only thing left to spend a thread on is an edge. Left in, a two-ink design comes back as two inks, bare fabric
+**and a grey hairline tracing every edge in it**, and the conversion loop then
+spends all four tries trying to make that hairline stitchable.
+
+So the extra entry is granted on the test the shop already applies to
+everything else — *can the machine sew it* — with the profile's own
+`stroke.min_width` in this attempt's pixels as the kernel. A ramp is one pixel
+wide by construction and vanishes under the erosion; a colour of the artwork has
+an inside. Rejecting it is **not** the same as keeping the background: the image
+is quantised again at the plain budget and the paper still goes.
+
+**`fit` had the same defect as `gaps`, and the plan only caught one of them.**
+Both columns are computed off the same render, and a dropped background breaks
+both — but differently, which is why one answer would not do for the pair. It
+took two separate corrections:
+
+- *the reference is the wrong width.* A conversion is now allowed `k` threads
+  **plus** the fabric, so grading it against the source at `k` colours *total*
+  compares two palettes and reports the difference as tracing error:
+  `photo-portrait` 0.027 → 0.802, `gradient-radial` 0.022 → 0.877, about
+  conversions that had not got worse at all. `fit_reference` re-quantises at
+  `k + 1` exactly when something was dropped — the same arithmetic the pipeline
+  did, from the measuring path's own working image rather than from the
+  conversion's palette, which would be grading a document against itself.
+- *the hole is compared against white.* `visual.compare_rasters` flattens onto
+  white by design, so an off-white scan reported 88% of itself as wrong.
+  `composite_behind` puts the reference's own ground behind the document, **and
+  only inside the dropped region** — filling every transparent pixel would paint
+  a seam that opened over artwork in exactly the colour the artwork should have
+  been and score it correct, hiding the one failure `gaps` exists to find.
+
+**The corpus is where the +1 was found to misfire, and where `fit` was found to
+be lying.** Neither is visible on one image; both are obvious in a table with a
+direction recorded for every column. That is B1 doing the job it was built
+before B3 to do.
+
+**Two consequences worth writing down rather than discovering later.**
+
+*A design that reaches the edges has its field dropped too.* `logo-three-colour`
+is deliberately full-bleed blue, and B8 leaves `#204aa0` — 76% of the image —
+unstitched. Whether that is right depends on something the tool cannot see: a
+patch wants the field stitched, a garment print does not. The mechanism is the
+corner fill and it has no opinion about colour, deliberately — a lightness test
+would misfire on kraft paper and on dark scans, and would be a second source of
+truth about what a background is. What the run does instead is say it, in the
+notes and in the UI, and offer `--keep-background`. **Phase C's C1 is the real
+answer**: a person picking the index, which is the same operation with a human
+at the controls.
+
+*The run had to say it, and the summary had to stop counting the budget.* A
+conversion now prints `#ffffff is left unstitched (85.1% of the image), so the
+fabric shows through there` without `-v` — the same reasoning as A6's skip list,
+that a run accounts for what it left out as plainly as for what it did, and here
+what it left out is most of the picture. And the summary counts **inks** in the
+document rather than `settings.colors`: a one-colour monogram reported as "3
+colour(s)" because the profile allows three is a claim about the file rather
+than about the permission, and B8 is exactly the change that made those two
+numbers differ.
+
+*The web UI needed a ground to show it on.* An SVG has no background unless
+something paints one, so the hole *is* the transparency and there is nothing to
+add to the file. The consequence lands in the preview: the page renders onto
+whatever is behind it, so a dropped background and a white fill are the same
+picture. The convert pane now draws on a chequered fabric and names the colour
+that left with its share, which is the page's version of the answer this step
+already had to write down for `fit`.
+
+<details>
+<summary>Original plan for this step</summary>
 
 **The pipeline already finds the background and throws the finding away.**
 `preprocess.flatten_background` floods in from the corners, works out the paper
@@ -1777,7 +1905,8 @@ Three costs, in the order they hurt:
 
 - it spends one of the shop's threads on the garment;
 - it is the largest-area layer, so it is stitched first and it is most of the
-  stitches in the file;
+  stitches in the file — *usually*: `paper-minority` was written for the case
+  where it is not, and that is where the fringe lives;
 - B4's trap grows every other layer under it, which is work done for the benefit
   of a layer that should not exist.
 
@@ -1877,8 +2006,12 @@ the dropped region; re-record the baseline.
 - `gaps` on a dropped-background document reports the **seam residue** it
   reported before, not the background.
 
-> **Open, and to be measured rather than assumed: excluding the background from
-> the *histogram*, not merely dropping its entry afterwards.** k+1 frees a
+</details>
+
+> **Still open, and still to be measured rather than assumed: excluding the
+> background from the *histogram*, not merely dropping its entry afterwards.**
+> The simple version landed and nothing in the table asked for more, so this was
+> not tried — it stays a question, not a finding. k+1 frees a
 > thread; taking the paper's pixels out of the clustering altogether would also
 > take them out of the competition for splits, and there is a mechanism by which
 > that matters — `quantise_lab` picks its next split with
@@ -1886,9 +2019,11 @@ the dropped region; re-record the baseline.
 > paper region with slight residual variation can win a split it does not need.
 > Whether that changes any real palette beyond what k+1 already does is an
 > empirical question, and B1 exists so this kind of question is answered by
-> `svgemb bench --convert` rather than by argument. Half a day to try, and it is
+> `svgemb bench --convert` rather than by argument. Half a day to try, and it was
 > deliberately not in B8's gate: land the simple version, look at the numbers,
-> and add this only if they ask for it.
+> and add this only if they ask for it. **They did not** — but note where it
+> would still pay if it ever does: a scan whose paper keeps some grain after
+> denoising, which is the case a generated corpus does not have.
 
 ---
 
@@ -1995,6 +2130,15 @@ the precondition for starting C3 is evidence, not appetite: **B8 has landed, and
 a colour that matters is still merged at the profile's own budget.** If nothing
 is, this step does not happen.
 
+**B8 has now landed, and the first half of the evidence points away from C3.**
+The freed thread went to an *edge* rather than to a colour on most of the
+corpus — the finding that put `_extra_entry_earned_its_thread` in the pipeline —
+so on a two-ink design there is no extra entry to place, and the question C3
+answers does not arise. It arises on `logo-five-colour`, which is the one corpus
+image where the +1 is earned and where a fifth colour is still merged. **One
+generated image is not evidence**; a real design a shop complained about would
+be. The gate stands as written.
+
 **What it is for, when the evidence does arrive.** Freeing a thread does not let
 you say where it goes. `quantise_lab` picks which box to split by `spread`,
 which is count-weighted squared error, so the entry goes where *population* is
@@ -2053,7 +2197,7 @@ B2 triage ──────────┘                                     
                                     ┌──────────────────────────────────────────────────┘
                                     │
                                     B8 background ──┬── C1 layer panel ── C2 recolour
-                                     ⬜ NOT STARTED  │    ⬜ NOT STARTED     ⬜ DEFERRED
+                                      ✅ CLEARED     │    ⬜ NOT STARTED     ⬜ DEFERRED
                                                     │
                                                     └── C3 pin a colour
                                                          ⬜ GATED ON B8's numbers
@@ -2085,7 +2229,7 @@ result against the shop's own rules, and — when it still fails — changes a
 setting the profile already allows and tries again. `scan-clean` went from `fit`
 0.253 to 0.032, the corpus traces with a third of the paths it did and then
 loses two thirds of *those* to cleanup, no image traces with a gap in it any
-more, and **13 of the 14 images a human called convertible now convert
+more, and **13 of the 14 images a human called convertible converted
 unattended** at `embroidery-strict`, where a single pass managed 11. The one
 that does not is 1 px line art, which is what it was drawn to be.
 
@@ -2093,22 +2237,30 @@ that does not is 1 px line art, which is what it was drawn to be.
 list, previews and sliders instead of flags — and the conversion handed to the
 checker and its repairs on the same page.
 
-**And then B8 reopened it**, which is what a roadmap written from use looks
-like. Running the finished pipeline on real artwork showed that every conversion
-of a design on paper spends one of the shop's threads on the paper — a defect no
-step planned for, because every step assumed a palette entry is a thread. B8 is
-the pipeline half (identify the background, exclude it, hand the freed thread
-back to the artwork) and Phase C is the half where a person picks the index
-instead of the corner fill. Neither is a new mechanism: B8 is the first
-"do not stitch this colour", and C1 is the same operation with a human at the
-controls.
+**And then B8 reopened it and closed it again**, which is what a roadmap written
+from use looks like. Running the finished pipeline on real artwork showed that
+every conversion of a design on paper spends one of the shop's threads on the
+paper — a defect no step planned for, because every step assumed a palette entry
+is a thread. B8 is the pipeline half (identify the background, exclude it, hand
+the freed thread back to the artwork) and Phase C is the half where a person
+picks the index instead of the corner fill. Neither is a new mechanism: B8 is
+the first "do not stitch this colour", and C1 is the same operation with a human
+at the controls.
 
-The corpus is also still asking for three things nobody planned: a **deskew**
-stage (the only triage miss left is `scan-skewed`, and nothing measures
-rotation), **EXIF orientation** (deferred out of B3, see there), and now a
-**`paper-minority`** fixture — every corpus image has its ground as the largest
-area, so the one case where dropping a background is not free is the one case
-nothing tests.
+B8 did not move that count — it converts nothing that did not convert before,
+and costs a few extra attempts at `embroidery-strict`. What it moved is what
+gets sewn: 573 subpaths where the corpus needed 622, one layer fewer wherever
+there is paper, and the thread that was going into the garment going into the
+drawing. Two things it taught that no plan had: a freed thread mostly goes to an
+*edge* rather than to a colour unless it is made to earn its place, and `fit`
+was quietly grading the size of the palette rather than the tracing as soon as
+the budget stopped meaning "entries".
+
+The corpus asked for three things nobody planned, and B8 delivered the third:
+**`paper-minority`**, a design whose ground is neither the largest area nor the
+smallest, because the one case where dropping a background is not free was the
+one case nothing tested. Still outstanding: a **deskew** stage (nothing measures
+rotation) and **EXIF orientation** (deferred out of B3, see there).
 
 ## Risks, named up front
 

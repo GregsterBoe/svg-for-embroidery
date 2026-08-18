@@ -585,3 +585,124 @@ def test_a_negative_overlap_is_a_usage_error(tmp_path, capsys):
     directory = tiny_corpus(tmp_path / "c", {"a": image(32, 32, lambda x, y: RED)})
     assert main(["bench", "--corpus", str(directory), "--overlap", "-1"]) == 2
     assert "cannot be negative" in capsys.readouterr().err
+
+
+# -- the seam column with a background dropped (B8) --------------------------
+
+def paper_minority(side=128):
+    """Two bands to the edges, with the paper as the four corners.
+
+    ``bench/corpus/paper-minority.png`` in miniature: the ground is neither the
+    largest area nor the smallest, so it does not sort to the bottom of the
+    stitching order and dropping it is not free.
+    """
+    low = round(side * 0.266)
+    high = low + round(side * 0.453)
+
+    def paint(x, y):
+        if low <= x < high:
+            return BLACK
+        if low <= y < high:
+            return RED
+        return WHITE
+
+    return image(side, side, paint)
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+@pytest.mark.skipif(default_renderer() is None, reason="no renderer installed here")
+def test_a_background_dropped_on_purpose_is_not_counted_as_a_seam(tmp_path):
+    """B8's gate on this column, and B1's own rule applied to it.
+
+    ``gaps`` reads the renderer's alpha, and a dropped background is unpainted
+    on purpose. Left alone the column reports a third of the picture as a defect
+    and the number that used to mean *a seam opened* means nothing. It still has
+    a real question to answer here — did the seam between the two **remaining**
+    inks hold — so the dropped region leaves the measurement rather than the
+    metric being abandoned.
+
+    Measured both ways on the same image, which is the only way to say that: the
+    naive reading blows up by two orders of magnitude and the corrected one
+    lands where the stitched-background document lands.
+    """
+    from svg_embroidery.bench import unstitched_mask
+    from svg_embroidery.convert import convert
+    from svg_embroidery.visual import render, show_through
+
+    source = paper_minority()
+    dropped = convert(source, BASIC, backend=default_backend(), name="a")
+    stitched = convert(
+        source, BASIC, backend=default_backend(), name="a", drop_background=False
+    )
+    assert dropped.best.prepared.background is not None
+    assert stitched.best.prepared.background is None
+
+    shot = render(dropped.svg, width=source.width)
+    naive = show_through(shot).area
+    corrected = show_through(shot, ignore=unstitched_mask(dropped.best, shot)).area
+    before = show_through(
+        render(stitched.svg, width=source.width),
+        ignore=unstitched_mask(stitched.best, shot),
+    ).area
+
+    assert naive > 0.2, "nearly a third of this document is bare fabric on purpose"
+    assert corrected < 0.0005, corrected
+    assert corrected <= before + 0.0005, (corrected, before)
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+@pytest.mark.skipif(default_renderer() is None, reason="no renderer installed here")
+def test_an_image_with_no_paper_measures_its_gaps_exactly_as_before(tmp_path):
+    """The old branch must not move: nothing dropped, no mask, the same number.
+
+    A mark on a field the corner fill swallows whole — so the fill has found
+    the picture rather than its background, and there is nothing to leave out.
+    """
+    from svg_embroidery.bench import unstitched_mask
+    from svg_embroidery.convert import convert
+
+    full_bleed = image(
+        128, 128,
+        lambda x, y: BLACK if (x - 64) ** 2 + (y - 64) ** 2 < 64 else WHITE,
+    )
+    entries = load_corpus(tiny_corpus(tmp_path / "c", {"a": full_bleed}))
+    row = run(entries, backend=default_backend(), convert=True).rows[0]
+
+    assert not any("left unstitched" in note for note in row.notes), row.notes
+    assert row.gaps is not None
+    # No entry was named as paper, so the column is computed with no mask at
+    # all — the code path every conversion took before B8.
+    conversion = convert(full_bleed, BASIC, backend=default_backend(), name="a")
+    assert conversion.best.prepared.background is None
+    assert unstitched_mask(conversion.best, full_bleed) is None
+
+
+@pytest.mark.skipif(not available_backends(), reason="no tracer installed here")
+@pytest.mark.skipif(default_renderer() is None, reason="no renderer installed here")
+def test_fit_grades_the_tracing_rather_than_the_size_of_the_palette(tmp_path):
+    """B8 moved what the colour budget means, and ``fit``'s reference moved with it.
+
+    A conversion that leaves the paper unstitched is allowed ``k`` threads
+    *plus* the fabric. Graded against the source at ``k`` colours total it is
+    two palettes being compared, and the difference is reported as tracing
+    error: measured on the corpus, ``photo-portrait`` went 0.027 → 0.802 and
+    ``gradient-radial`` 0.022 → 0.877 about conversions that had not changed.
+    """
+    from svg_embroidery.bench import fit_reference
+
+    entries = load_corpus(tiny_corpus(tmp_path / "c", {"a": paper_minority()}))
+    row = run(entries, backend=default_backend(), convert=True, preprocess=True).rows[0]
+    assert row.fit is not None and row.fit < 0.05, row.fit
+
+    # The reference is one entry wider than the row's own, and it is built from
+    # the source rather than from the document it is grading.
+    from svg_embroidery.raster import quantise
+
+    ramp = image(64, 64, lambda x, y: (x * 4 % 256, 40, 255 - x * 4 % 256, 255))
+    reference = fit_reference(ramp, quantise(ramp, 3), 3, 1, preprocess=False)
+    assert reference.colors == 4
+    assert reference.palette == quantise(ramp, 4).palette
+
+    # With nothing to re-quantise it falls back, which is the pre-B8 signature.
+    same = quantise(ramp, 3)
+    assert fit_reference(None, same, 3, 1, preprocess=False) is same

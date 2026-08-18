@@ -295,6 +295,44 @@ def compare_rasters(
     )
 
 
+def composite_behind(
+    raster: Raster, ground: Raster, where: Sequence[bool]
+) -> Raster:
+    """Put ``ground`` behind ``raster``, but only in the pixels ``where`` marks.
+
+    B8's other half. A converted document has a hole where its source had
+    paper, and :func:`compare_rasters` flattens both sides onto white — so an
+    off-white scan reports 88% of itself as wrong and a dark photograph reports
+    all of it, about a conversion that is very nearly perfect. The design is
+    going to be sewn onto fabric, and the best stand-in for that fabric is the
+    ground the source actually had, pixel for pixel.
+
+    **Only inside the mask**, which is the whole care in this function. Filling
+    every transparent pixel from the reference would paint a seam that opened
+    over *artwork* in exactly the colour the artwork should have been, and
+    score it correct — hiding the one failure `gaps` exists to find. So a hole
+    is excused where it was asked for and nowhere else.
+    """
+    if raster.size != ground.size:
+        return raster
+    out = bytearray(raster.pixels)
+    behind = ground.pixels
+    for pixel in range(raster.width * raster.height):
+        index = pixel * 4
+        if not where[pixel]:
+            continue
+        alpha = out[index + 3]
+        if alpha == 255:
+            continue  # something painted here after all, and it has to answer for it
+        inverse = 255 - alpha
+        for channel in range(3):
+            out[index + channel] = (
+                out[index + channel] * alpha + behind[index + channel] * inverse
+            ) // 255
+        out[index + 3] = 255
+    return Raster(width=raster.width, height=raster.height, pixels=bytes(out))
+
+
 # ---------------------------------------------------------- show-through
 
 
@@ -346,7 +384,11 @@ class ShowThrough:
         )
 
 
-def show_through(raster: Raster, margin: int = 1) -> ShowThrough:
+def show_through(
+    raster: Raster,
+    margin: int = 1,
+    ignore: Optional[Sequence[bool]] = None,
+) -> ShowThrough:
     """Measure where a rendering has no paint on it — B4's seam instrument.
 
     Two shapes drawn edge to edge do not join. Even when their outlines agree to
@@ -368,21 +410,38 @@ def show_through(raster: Raster, margin: int = 1) -> ShowThrough:
     the canvas is half-covered by the edge of the artwork in every correctly
     drawn document. That is the edge of the page, not a seam, and counting it
     would put a floor under the metric that no fix could ever reach.
+
+    ``ignore`` drops pixels that are bare **on purpose** — B8's dropped
+    background, one flag per pixel of ``raster`` in row-major order. They leave
+    the denominator as well as the count, because a document that is one third
+    deliberate fabric has not got a third less seam to show: the question this
+    answers is *did the layers that are there join up*, and it can only be asked
+    about the part of the canvas somebody meant to stitch. Without it, dropping
+    a background reads as the largest gap the instrument has ever seen and the
+    column stops meaning anything.
     """
     width, height = raster.width, raster.height
     inner_width = width - 2 * margin
     inner_height = height - 2 * margin
     if inner_width < 1 or inner_height < 1:  # too small to have an inside
         return ShowThrough(pixels=0, total_pixels=0, missing=0.0, worst=255)
+    if ignore is not None and len(ignore) != width * height:
+        raise ValueError(
+            f"ignore covers {len(ignore)} pixels, but the image has {width * height}"
+        )
 
     pixels = raster.pixels
     count = 0
     missing = 0
     worst = 255
+    total = 0
     for y in range(margin, height - margin):
         row = y * width
-        for index in range((row + margin) * 4 + 3, (row + width - margin) * 4 + 3, 4):
-            alpha = pixels[index]
+        for position in range(row + margin, row + width - margin):
+            if ignore is not None and ignore[position]:
+                continue
+            total += 1
+            alpha = pixels[position * 4 + 3]
             if alpha < 255:
                 count += 1
                 missing += 255 - alpha
@@ -390,7 +449,7 @@ def show_through(raster: Raster, margin: int = 1) -> ShowThrough:
                     worst = alpha
     return ShowThrough(
         pixels=count,
-        total_pixels=inner_width * inner_height,
+        total_pixels=total,
         missing=missing / 255.0,
         worst=worst,
     )

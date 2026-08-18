@@ -356,6 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="convert once and report the verdict, without adjusting anything",
     )
     convert.add_argument(
+        "--keep-background",
+        action="store_true",
+        help="stitch the paper as a colour instead of leaving the fabric bare; "
+        "costs one of the profile's threads",
+    )
+    convert.add_argument(
         "-v", "--verbose", action="store_true", help="show what every stage did"
     )
     convert.add_argument("--json", action="store_true", help="machine readable output")
@@ -1106,6 +1112,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
                 path,
                 profile,
                 backend=backend,
+                drop_background=not args.keep_background,
                 **({} if tries is None else {"tries": tries}),
             )
             for path in files

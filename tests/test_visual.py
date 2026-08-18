@@ -13,6 +13,7 @@ from svg_embroidery.visual import (
     Raster,
     available_renderers,
     compare_rasters,
+    composite_behind,
     decode_png,
     default_renderer,
     render,
@@ -227,6 +228,64 @@ def test_two_shapes_drawn_edge_to_edge_leave_a_seam():
 
     assert show_through(render(butted, width=40)).area > 0.0
     assert show_through(render(trapped, width=40)).area == 0.0
+
+
+# -- B8: fabric behind a hole that was asked for ---------------------------
+
+def coloured(width, height, rows):
+    """A raster from ``(r, g, b, a)`` tuples, written out row by row."""
+    pixels = bytearray()
+    for row in rows:
+        for pixel in row:
+            pixels += bytes(pixel)
+    return Raster(width, height, bytes(pixels))
+
+
+BARE = (0, 0, 0, 0)
+INK = (26, 26, 26, 255)
+PAPER = (249, 246, 239, 255)
+
+
+def test_a_hole_that_was_asked_for_costs_nothing_against_its_own_ground():
+    """B8: a dropped background is a hole, and on white it reads as 88% wrong.
+
+    ``scan-clean``'s paper is ``#f9f6ef``, so flattening a document with that
+    region missing onto white reports most of the image as a tracing error
+    about a conversion that is very nearly perfect.
+    """
+    source = coloured(2, 1, [[PAPER, INK]])
+    document = coloured(2, 1, [[BARE, INK]])
+    dropped = [True, False]
+
+    assert compare_rasters(source, document).ratio == 0.5
+    assert compare_rasters(source, composite_behind(document, source, dropped)).ratio == 0.0
+
+
+def test_a_hole_nobody_asked_for_still_counts():
+    """The care in the function: only the mask is excused.
+
+    Filling every transparent pixel from the reference would paint a seam that
+    opened over artwork in exactly the colour the artwork should have been, and
+    grade it correct — hiding the failure ``gaps`` exists to find.
+    """
+    source = coloured(2, 1, [[PAPER, INK]])
+    seam = coloured(2, 1, [[PAPER, BARE]])  # the ink layer failed to paint
+    dropped = [True, False]
+
+    patched = composite_behind(seam, source, dropped)
+    assert compare_rasters(source, patched).ratio == 0.5, "the seam is still wrong"
+
+
+def test_paint_inside_the_dropped_region_still_has_to_answer_for_itself():
+    """A layer grown into the hole is a fringe, and the ground must not hide it."""
+    source = coloured(2, 1, [[PAPER, INK]])
+    fringed = coloured(2, 1, [[INK, INK]])  # the ink spread over the paper
+    assert compare_rasters(source, composite_behind(fringed, source, [True, False])).ratio == 0.5
+
+
+def test_mismatched_sizes_are_left_alone_rather_than_guessed_at():
+    small = coloured(1, 1, [[BARE]])
+    assert composite_behind(small, coloured(2, 1, [[PAPER, INK]]), [True]) is small
 
 
 # -- with a real renderer --------------------------------------------------

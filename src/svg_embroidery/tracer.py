@@ -220,7 +220,10 @@ def _dilate(claims: List[int], width: int, height: int) -> List[int]:
 
 
 def trapped_claims(
-    quantisation: Quantisation, order: Sequence[int], overlap: int = DEFAULT_OVERLAP
+    quantisation: Quantisation,
+    order: Sequence[int],
+    overlap: int = DEFAULT_OVERLAP,
+    skip: Sequence[int] = (),
 ) -> List[int]:
     """Which layers cover each pixel, once every colour is spread under its successors.
 
@@ -255,19 +258,33 @@ def trapped_claims(
     nothing — and it is what an embroidery digitiser does by hand as pull
     compensation, because fabric moves under the needle and a butt joint opens
     up on the first wash.
+
+    **A layer in ``skip`` is not going to be stitched** (B8's background, or a
+    colour a person removed), so nothing may grow underneath it: there is no
+    later layer to hide the growth, only fabric. Without this, dropping a colour
+    that is *not* the bottom layer leaves the one-pixel spread of everything
+    beneath it exposed as a fringe of the wrong colour around the hole. Where
+    the dropped layer is the bottom one — the usual case, since order is
+    largest-area-first and paper is usually the largest area — nothing was
+    growing into it anyway and this changes nothing.
     """
     total = quantisation.width * quantisation.height
     rank = [0] * quantisation.colors
     for position, index in enumerate(order):
         rank[index] = position
+    skipped = set(skip)
 
     claims = [1 << rank[value] for value in quantisation.indices]
     if overlap < 1 or total < 1:
         return claims
 
     # A pixel may be claimed by layers stitched before its own and by no others:
-    # those are the ones it is painted over by, so their growth cannot show.
-    allowed = [(1 << rank[value]) - 1 for value in quantisation.indices]
+    # those are the ones it is painted over by, so their growth cannot show. A
+    # pixel nobody is going to paint admits nobody.
+    allowed = [
+        0 if value in skipped else (1 << rank[value]) - 1
+        for value in quantisation.indices
+    ]
     for _ in range(overlap):
         spread = _dilate(claims, quantisation.width, quantisation.height)
         claims = [
@@ -312,7 +329,15 @@ class Backend:
         quantisation: Quantisation,
         canvas_mm: float = DEFAULT_CANVAS_MM,
         overlap: int = DEFAULT_OVERLAP,
+        skip: Sequence[int] = (),
     ) -> Trace:  # pragma: no cover
+        """``skip`` names palette entries to leave unstitched — see B8.
+
+        Not "delete these pixels": the labels stay, because the layers around a
+        dropped one still have to know what they border. What changes is that no
+        ``<g>`` is written for it, so the document has nothing there at all and
+        the fabric is the background.
+        """
         raise NotImplementedError
 
 
@@ -337,16 +362,29 @@ class MaskBackend(Backend):
         quantisation: Quantisation,
         canvas_mm: float = DEFAULT_CANVAS_MM,
         overlap: int = DEFAULT_OVERLAP,
+        skip: Sequence[int] = (),
     ) -> Trace:
         if not self.available():
             raise TracerError(f"{self.name} is not available here — {self.install}")
         started = time.monotonic()
         layers: List[Layer] = []
+        skipped = set(skip)
         order = layer_order(quantisation)
-        claims = trapped_claims(quantisation, order, overlap)
+        claims = trapped_claims(quantisation, order, overlap, skip=skip)
+        notes = []
         for position, index in enumerate(order):
             area = quantisation.area(index)
             if area <= 0:
+                continue
+            if index in skipped:
+                # Left out of the document entirely rather than painted in the
+                # page colour: an SVG has no background unless something draws
+                # one, so this *is* the transparency.
+                notes.append(
+                    "#{:02x}{:02x}{:02x}".format(*quantisation.palette[index])
+                    + f" is left unstitched ({area:.1%} of the image), so the "
+                    "fabric shows through there"
+                )
                 continue
             # Everything this layer covers: its own pixels, plus the border it
             # was spread into under the layers stitched after it.
@@ -375,6 +413,7 @@ class MaskBackend(Backend):
             paths=paths,
             nodes=nodes,
             seconds=time.monotonic() - started,
+            notes=notes,
             overlap=overlap,
         )
 
@@ -522,6 +561,7 @@ class VtracerLibrary(Backend):
         quantisation: Quantisation,
         canvas_mm: float = DEFAULT_CANVAS_MM,
         overlap: int = DEFAULT_OVERLAP,
+        skip: Sequence[int] = (),
     ) -> Trace:
         if not self.available():
             raise TracerError(f"{self.name} is not available here — {self.install}")
@@ -554,6 +594,14 @@ class VtracerLibrary(Backend):
                 "traces colour directly, so it draws its own boundaries and the "
                 "seam overlap does not apply; whatever the 'gaps' column says "
                 "here is vtracer's own doing, not ours"
+            )
+        if skip:
+            # Said rather than silently ignored, for B4's reason: restructuring
+            # its output to look as though it honoured a palette it never read
+            # would be a worse kind of wrong than being honestly unsuitable.
+            notes.append(
+                "picks its own palette, so there is no entry of ours to leave "
+                "out — the background is stitched here whatever was asked for"
             )
         paths, nodes = measure_svg(svg)
         return Trace(

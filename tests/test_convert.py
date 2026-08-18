@@ -11,6 +11,7 @@ and stitchable at a size it also allows.
 import pytest
 
 from svg_embroidery.checker import Checker
+from svg_embroidery.document import parse_svg
 from svg_embroidery.cli import main
 from svg_embroidery.convert import (
     CANVAS_STEP,
@@ -446,3 +447,94 @@ def test_a_baseline_taken_without_the_loop_is_not_diffed():
 def test_the_loop_and_the_tracer_comparison_are_different_questions(capsys):
     assert main(["bench", "--convert", "--tracers"]) == 2
     assert "different questions" in capsys.readouterr().err
+
+
+# -- B8: the colour budget is threads, and the paper is not one --------------
+
+def three_inks_on_paper(side=128):
+    """Three flat inks on white, which is four colours at a budget of three."""
+    def paint(x, y):
+        if 10 <= x < 40:
+            return BLACK
+        if 50 <= x < 80:
+            return (200, 16, 46, 255)
+        if 90 <= x < 118:
+            return (32, 74, 160, 255)
+        return WHITE
+
+    return image(side, side, paint)
+
+
+@needs_tracer
+def test_the_budget_buys_three_threads_of_ink_rather_than_two_and_the_paper():
+    """B8's decision, made visible in the checker's own output.
+
+    ``color.max_count`` at 3 used to mean *two inks and the garment*, because
+    the paper was a palette entry like any other. Three inks on white now come
+    out as three inks, and the document still passes the rule it was converted
+    for — the +1 is spent on the artwork, not on the budget.
+    """
+    result = convert(three_inks_on_paper(), BASIC, name="three-inks")
+    document = parse_svg(result.svg)
+
+    assert result.passes, [f.message for f in result.best.errors]
+    assert len(document.colors()) == 3
+    assert "#ffffff" not in {color.lower() for color in document.colors()}
+    assert any("left unstitched" in note for note in result.best.trace_notes)
+
+
+@needs_tracer
+def test_keeping_the_background_spends_a_thread_on_the_garment():
+    """The opt-out, and the reading it restores.
+
+    Not a retry knob — no failure the loop can see is answered by stitching the
+    paper back in — so it is a flag on the command rather than something
+    ``plan_next`` may turn. What it buys is the pre-B8 document: the paper is a
+    colour, and it is one of the three the profile allows.
+    """
+    kept = convert(three_inks_on_paper(), BASIC, name="three-inks", drop_background=False)
+    colors = {color.lower() for color in parse_svg(kept.svg).colors()}
+
+    assert kept.best.prepared.background is None
+    assert "#ffffff" in colors
+    assert not any("left unstitched" in note for note in kept.best.trace_notes)
+    # ...and the ink the paper displaced is the one that had to go.
+    assert len(colors) == 3
+
+
+@needs_tracer
+def test_the_command_can_be_told_to_stitch_the_paper(tmp_path, capsys):
+    source = tmp_path / "inks.png"
+    source.write_bytes(encode_png(three_inks_on_paper()))
+    out = tmp_path / "kept.svg"
+
+    assert main(["convert", str(source), "--keep-background", "-o", str(out)]) == 0
+    assert "#ffffff" in out.read_text(encoding="utf-8").lower()
+
+    dropped = tmp_path / "dropped.svg"
+    assert main(["convert", str(source), "-o", str(dropped)]) == 0
+    assert "#ffffff" not in dropped.read_text(encoding="utf-8").lower()
+
+
+@needs_tracer
+def test_the_run_says_what_it_left_to_the_fabric_without_being_asked(tmp_path, capsys):
+    """B8's news is the loudest thing the run did, and -v is too late to hear it.
+
+    Same reasoning as A6's skip list: a run accounts for what it left out as
+    plainly as for what it did. And the summary counts **inks**, not the
+    profile's budget — a one-ink design on paper reported as "3 colour(s)"
+    because three are allowed is a claim about the file, not the permission.
+    """
+    source = tmp_path / "one-ink.png"
+    source.write_bytes(encode_png(image(128, 128, lambda x, y: BLACK if 40 <= x < 88 else WHITE)))
+
+    assert main(["convert", str(source)]) == 0
+    out = capsys.readouterr().out
+    assert "1 ink(s)" in out
+    assert "#ffffff is left unstitched" in out and "fabric shows through" in out
+
+    # Stitch it instead and neither line appears: the paper is a colour again.
+    assert main(["convert", str(source), "--keep-background"]) == 0
+    kept = capsys.readouterr().out
+    assert "2 ink(s)" in kept
+    assert "left unstitched" not in kept

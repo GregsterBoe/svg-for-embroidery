@@ -455,9 +455,9 @@ comes first and the tracer gets fitted to it.
 make bench          # or: svgemb bench
 ```
 
-Twenty generated images — flat logos, line art, scans, photos, transparency,
-gradients, low-resolution junk — each measured against the profile it is aimed
-at:
+Twenty-one generated images — flat logos, line art, scans, photos,
+transparency, gradients, low-resolution junk — each measured against the profile
+it is aimed at:
 
 ```
 image              kind      expect     verdict       size   res   mm/px   colours    k    flat   quant   edges    thin
@@ -558,7 +558,7 @@ that records what a human says before measuring anything, so the run grades its
 own thresholds:
 
 ```
-triage agrees with 'expect' on 19/20 image(s)
+triage agrees with 'expect' on 20/21 image(s)
 ℹ️  scan-clean  expected good, triage says marginal
 ```
 
@@ -831,6 +831,83 @@ See [docs/ROADMAP.md](docs/ROADMAP.md#b7-in-the-ui---cleared) for the two
 decisions that cost something: why an over-sized upload is refused instead of
 resized, and why the server now remembers a decoded image at all.
 
+**B8 — the background is not a colour.** Every conversion of artwork on paper
+was spending one of the shop's threads on the paper, and nobody stitches the
+garment. The pipeline already found the background — `flatten_background` floods
+in from the corners — and then threw the finding away, so by the time the
+quantiser ran, paper was one cluster like any other.
+
+```bash
+svgemb convert scan.png -o design.svg          # the paper is left to the fabric
+svgemb convert scan.png --keep-background      # ...or stitched, at the cost of a thread
+```
+
+```
+✅ converted at 10.0 cm: 1 ink(s), 1 shape(s), 36 node(s), 1 attempt(s)
+ℹ️  #ffffff is left unstitched (85.1% of the image), so the fabric shows through there
+```
+
+That second line prints without `-v`, for the reason `svgemb fix` prints its
+skip list: what a run left out is news, and here it is most of the picture. The
+summary counts **inks** rather than the profile's budget — a one-colour monogram
+reported as "3 colour(s)" because three are allowed is a claim about the file
+rather than about the permission.
+
+**`color.max_count` counts threads, so the quantiser is asked for k+1.** The
+rule's number is what a shop loads onto the machine, and paper is not loaded
+onto the machine. Otherwise the same artwork gets three inks exported with an
+alpha channel and two scanned onto white paper — the tool grading the file
+format rather than the design.
+
+| | background stitched | left unstitched |
+| --- | --- | --- |
+| subpaths over the corpus | 622 | **573** |
+| nodes | 14254 | **13465** |
+| `fit`, mean | 0.065 | **0.062** |
+| images a human called convertible that convert | 15/15 | 15/15 |
+
+Nothing converts that did not convert before; what changes is what gets sewn.
+`monogram` and `line-art-thick` go from two colours to **one ink on bare
+fabric**, and `logo-five-colour` finally spends all three threads on the logo.
+
+**The extra thread has to be earned, and mostly it is not.** Handing the
+quantiser a spare entry does not hand it to the drawing — on 11 of the 18 corpus
+images where a background is found at all, it goes to the antialiasing ramp
+between two real colours (`#8c8c8c` at 0.25% of `logo-two-colour`), because a
+filtered hard edge really is a distinct colour, just not one anybody chose. The
+seven that earn it are the ones with real colour in them: the photographs, the
+gradients, and `logo-five-colour`, which gets a fourth logo colour the old
+budget could not afford. Left in, a two-ink design comes back as two inks,
+bare fabric **and a grey hairline tracing every edge in it**. So the entry is
+granted on the test the shop already applies to everything else — *can the
+machine sew it* — using the profile's own minimum width as the kernel. Rejected,
+the image is quantised again at the plain budget and the paper still goes.
+
+**Two guards decide whether anything is dropped at all**, because this is the
+one place where dropping the wrong entry deletes somebody's drawing: the paper
+has to land in a *single* palette entry, and that entry has to be *mostly*
+paper. Either way the answer is the document this image got before B8 — a
+background that cannot be identified safely is not a failure, it is a conversion
+that keeps its background.
+
+**A hole is invisible against white, and two measurements had to be told.**
+`gaps` reads the renderer's alpha, so it drops the region that is bare on
+purpose and keeps answering the only question it was built for: did a seam open.
+`fit` needed two corrections — its reference is re-quantised at `k + 1` (grading
+a `k`-ink-plus-fabric document against a `k`-colour source compares two palettes
+and calls the difference tracing error: `photo-portrait` 0.027 → 0.802) and the
+source's own ground is composited behind the hole, but **only inside it**, so a
+seam that opens over artwork still counts. The web UI has the same problem and
+the same answer: the convert preview draws on chequered fabric and names the
+colour that left.
+
+**The case that is a judgement, not a bug:** a design that reaches the edges has
+its field dropped too — `logo-three-colour` is deliberately full-bleed blue and
+comes back as two shapes on bare cloth. A patch wants that field stitched, a
+garment print does not, and the tool cannot see which. It says so in the notes
+and offers `--keep-background`; Phase C's layer panel is where a person picks
+the index instead of the corner fill.
+
 ### Optional capabilities
 
 The checker needs nothing but the standard library and PyYAML. Heavier work is
@@ -878,7 +955,7 @@ There is deliberately **no separate mobile edition** — see the decision in
 ## Development
 
 ```bash
-make test         # 591 tests
+make test         # 616 tests
 make degraded     # the same suite with every optional extra switched off
 make bench        # measure the image corpus against the baseline
 make tracers      # compare every installed tracer on the corpus (roadmap B0)

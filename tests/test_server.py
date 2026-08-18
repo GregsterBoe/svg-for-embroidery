@@ -574,3 +574,39 @@ def test_a_tab_running_an_older_build_is_told_to_reload(base_url):
     assert "location.reload()" in body
     # Wired into every request, so the notice appears on the next thing you do.
     assert body.count(".then(fresh)") == 3
+
+
+# -- B8: a hole a page cannot show by default ------------------------------
+
+@needs_tracer
+def test_a_dropped_background_is_named_rather_than_left_to_be_noticed(base_url):
+    """The page renders onto whatever is behind it, so a hole reads as white paint.
+
+    ``line-art-thick`` is a drawing on paper, so a conversion of it leaves the
+    paper unstitched — the largest single thing in the picture, and invisible
+    in a preview unless the page is told. It gets both: the colour and its
+    share as data, and the trace's own sentence among the notes.
+    """
+    _, start = upload(base_url)
+    _, attempt = post_json(
+        base_url + "/api/convert", {"key": start["key"], "profile": "embroidery-strict"}
+    )
+    assert attempt["unstitched"], attempt["notes"]
+    assert attempt["unstitched"]["color"].startswith("#")
+    assert 0.0 < attempt["unstitched"]["share"] < 1.0
+    assert any("left unstitched" in note for note in attempt["notes"])
+    # ...and the colour that left is not painted anywhere in the document.
+    assert attempt["unstitched"]["color"] not in attempt["svg"].lower()
+
+
+def test_the_page_previews_a_conversion_on_fabric_rather_than_on_white(base_url):
+    """Otherwise a dropped background and a white one are the same picture.
+
+    The same trap ``visual.py`` has by design — it composites onto white before
+    comparing — so this is the page's version of the answer B8 wrote down.
+    """
+    _, body = get(base_url + "/")
+    assert ".ba img.fabric" in body
+    assert 'id="ba-right" class="fabric"' in body
+    assert "is the ground, not a" in body
+    assert "--keep-background" in body

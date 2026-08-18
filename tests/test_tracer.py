@@ -424,3 +424,168 @@ def test_closing_the_seams_does_not_move_the_artwork():
         assert (
             compare_rasters(want, trapped).ratio <= compare_rasters(want, butted).ratio
         ), f"{backend.name} traced the artwork less faithfully with the overlap on"
+
+
+# -- B8: a colour left unstitched --------------------------------------------
+
+def neighbours(index, width, height):
+    y, x = divmod(index, width)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if 0 <= y + dy < height and 0 <= x + dx < width:
+                yield y + dy, x + dx
+
+
+def grow(mask, width, height):
+    """One pixel of dilation — ``bench.unstitched_mask`` in test-sized form."""
+    out = list(mask)
+    for y in range(height):
+        for x in range(width):
+            if not mask[y * width + x]:
+                continue
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if 0 <= y + dy < height and 0 <= x + dx < width:
+                        out[(y + dy) * width + x + dx] = True
+    return out
+
+def paper_between_two_inks(side=64):
+    """Two bands crossing to the edges, with the paper as the four corners.
+
+    The corpus's ``paper-minority`` fixture in miniature, and it is the shape
+    that matters rather than the picture: **red 25%, paper 30%, blue 45%**, so
+    the paper sorts to the *middle* of the stitching order. Every other image
+    has its ground as the largest area, where dropping it is free because
+    nothing was ever grown underneath it.
+    """
+    low = round(side * 0.266)
+    high = low + round(side * 0.453)
+
+    def label(x, y):
+        if low <= x < high:
+            return 2  # the wider band, top to bottom, so it is stitched first
+        if low <= y < high:
+            return 1  # the narrower band, side to side, stitched last
+        return 0      # paper, in the four corners
+
+    return Quantisation(
+        palette=[WHITE, RED, BLACK],
+        indices=[label(x, y) for y in range(side) for x in range(side)],
+        width=side,
+        height=side,
+    )
+
+
+def test_the_paper_is_neither_the_first_nor_the_last_layer_in_the_fixture():
+    """The fixture only tests anything while this holds, so it is asserted."""
+    quant = paper_between_two_inks()
+    assert layer_order(quant) == [2, 0, 1]
+    assert 0.29 < quant.area(0) < 0.31
+    assert quant.area(2) > quant.area(0) > quant.area(1)
+
+
+def test_nothing_grows_under_a_layer_that_is_not_going_to_be_stitched():
+    """B8's fringe, on the labels themselves.
+
+    ``trapped_claims`` lets a layer grow into the pixels of layers stitched
+    after it, because those pixels get painted over. A layer nobody is going to
+    stitch paints over nothing — there is only fabric — so growth into it would
+    survive as a hairline of the wrong colour around the hole.
+    """
+    quant = paper_between_two_inks()
+    order = layer_order(quant)
+    paper = order.index(0)
+
+    grown = trapped_claims(quant, order, overlap=1)
+    dropped = trapped_claims(quant, order, overlap=1, skip=(0,))
+
+    # Without the exclusion the blue beneath does spread into the paper...
+    into_paper = [
+        index
+        for index, covered in enumerate(covered_by(grown, 0))
+        if covered and quant.indices[index] == 0
+    ]
+    assert into_paper, "the fixture has to have something to grow, or it proves nothing"
+
+    # ...and with it, every pixel of paper is left to the fabric.
+    for index, covered in enumerate(covered_by(dropped, 0)):
+        assert not (covered and quant.indices[index] == 0)
+    # The paper's own layer is untouched: it is left out of the document, not
+    # relabelled, so the layers around it still know what they border.
+    assert covered_by(dropped, paper) == covered_by(grown, paper)
+
+
+def test_dropping_the_bottom_layer_changes_nothing_at_all():
+    """The usual case, and the reason the exclusion is cheap: paper is biggest."""
+    quant = labelled(3, 3, [[0, 0, 0], [0, 1, 0], [0, 0, 0]], (WHITE, BLACK))
+    order = layer_order(quant)
+    assert order[0] == 0
+    assert trapped_claims(quant, order, overlap=1) == trapped_claims(
+        quant, order, overlap=1, skip=(0,)
+    )
+
+
+@installed
+def test_a_skipped_colour_gets_no_group_and_is_said_out_loud():
+    quant = paper_between_two_inks()
+    for backend in available_backends():
+        if backend.kind != "mask":
+            continue
+        result = backend.trace(quant, canvas_mm=100.0, overlap=1, skip=(0,))
+        assert result.layers == 2, backend.name
+        assert hex_color(WHITE) not in result.svg, backend.name
+        assert any("left unstitched" in note for note in result.notes), backend.name
+        # ...and says how much of the picture it is, since that is the whole
+        # difference between a background dropped and a hole nobody meant.
+        share = f"{quant.area(0):.1%}"
+        assert any(share in note for note in result.notes), backend.name
+
+
+@installed
+@renderable
+def test_the_hole_is_the_shape_of_the_paper_and_has_no_fringe_round_it():
+    """The gate: rendered over a ground that is not white, the corners *are* the ground.
+
+    ``visual`` composites onto white before comparing, by design, so a document
+    with a hole in it and one with white paint in it look identical. The hole
+    has to be measured as alpha, which is what :func:`show_through` reads.
+    """
+    quant = paper_between_two_inks()
+    paper = [value == 0 for value in quant.indices]
+    for backend in available_backends():
+        if backend.kind != "mask":
+            continue
+        shot = render(
+            backend.trace(quant, canvas_mm=100.0, overlap=1, skip=(0,)).svg,
+            width=quant.width,
+        )
+        bare = [shot.pixels[i * 4 + 3] < 128 for i in range(quant.width * quant.height)]
+
+        # Every pixel of paper is bare fabric. A fringe is *solid* paint — a
+        # layer grown a pixel into the hole — where the rim of the hole is only
+        # ever half-covered, so the budget is a fraction of that rim rather than
+        # a round number: measured, this is 0 with the exclusion in place and 70
+        # without it, against a rim of 136.
+        rim = sum(
+            1
+            for index, want in enumerate(paper)
+            if want and any(
+                not paper[ny * quant.width + nx]
+                for ny, nx in neighbours(index, quant.width, quant.height)
+            )
+        )
+        missed = sum(1 for i, want in enumerate(paper) if want and not bare[i])
+        # ...and nothing outside the paper is bare, which is the other half: the
+        # inks that remain still cover everything they used to.
+        spilled = sum(1 for i, want in enumerate(paper) if not want and bare[i])
+        assert missed < rim // 4, f"{backend.name}: {missed} paper pixels still painted"
+        assert spilled < rim // 4, f"{backend.name}: {spilled} pixels bare that should not be"
+
+        # And the seam question still gets its old answer, once the hole is
+        # taken out of it: the two inks that remain still meet cleanly. The mask
+        # is grown by a pixel first, for the reason ``show_through`` already
+        # drops a frame from the canvas edge and ``bench.unstitched_mask`` grows
+        # this one — the rim of a deliberate hole is the outer boundary of the
+        # artwork, not a seam between two layers.
+        assert show_through(shot, ignore=grow(paper, quant.width, quant.height)).area \
+            < SEAM_BUDGET, backend.name
